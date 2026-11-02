@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WorkBuddy 状态灯 · 界面模拟器</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 24px;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+    background: #f7f7f5; color: #2c2c2a;
+  }
+  h1 { font-size: 16px; font-weight: 500; margin: 0 0 4px; }
+  .sub { font-size: 13px; color: #5f5e5a; margin: 0 0 24px; }
+  .wrap { display: flex; gap: 40px; align-items: flex-start; flex-wrap: wrap; }
+  .device {
+    background: #1a1c22; padding: 20px; border-radius: 24px;
+    box-shadow: 0 2px 24px rgba(0,0,0,.14);
+  }
+  canvas { display: block; border-radius: 12px; cursor: pointer; touch-action: none; }
+  .cap { font-size: 12px; color: #6b7280; text-align: center; margin-top: 10px; }
+  .panel { flex: 1; min-width: 320px; max-width: 460px; }
+  .card {
+    background: #fff; border: 1px solid #e5e3dc; border-radius: 12px;
+    padding: 16px; margin-bottom: 14px;
+  }
+  .card h2 { font-size: 13px; font-weight: 500; margin: 0 0 12px; color: #2c2c2a; }
+  .row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 0; border-bottom: 1px solid #f0efe9;
+  }
+  .row:last-child { border-bottom: 0; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px; }
+  .lbl {
+    flex: 1; font-size: 13px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap;
+  }
+  select {
+    font-size: 12px; padding: 4px 6px; border: 1px solid #d3d1c7;
+    border-radius: 6px; background: #fff; color: #2c2c2a;
+  }
+  button {
+    font-size: 12px; padding: 6px 12px; border: 1px solid #d3d1c7;
+    border-radius: 6px; background: #fff; color: #2c2c2a; cursor: pointer;
+  }
+  button:hover { background: #f5f5f2; }
+  button.primary { background: #185fa5; border-color: #185fa5; color: #fff; }
+  button.primary:hover { background: #14507f; }
+  .btns { display: flex; gap: 8px; flex-wrap: wrap; }
+  .hint { font-size: 12px; color: #6b7280; line-height: 1.7; margin: 0; }
+  .del {
+    border: 0; background: none; color: #a32d2d; font-size: 15px;
+    padding: 0 4px; line-height: 1;
+  }
+  code { background: #f1efe8; padding: 1px 4px; border-radius: 3px; font-size: 11px; }
+</style>
+</head>
+<body>
+<h1>WorkBuddy 状态灯 · 界面模拟器</h1>
+<p class="sub">1.54" 240×240 屏幕按 2 倍放大。点击画面可以和真实设备一样操作。</p>
+
+<div class="wrap">
+  <div>
+    <div class="device">
+      <canvas id="scr" width="480" height="480"></canvas>
+    </div>
+    <p class="cap">点齿轮 → 选 WiFi → 输密码；或点「触发审批」看审批页</p>
+  </div>
+
+  <div class="panel">
+    <div class="card">
+      <h2>任务列表</h2>
+      <div id="taskList"></div>
+      <div class="btns" style="margin-top:12px">
+        <button id="addTask">+ 添加任务</button>
+        <button id="demoApprove" class="primary">触发审批</button>
+        <button id="demoThree">同时 3 个</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>电量</h2>
+      <div class="row" style="border:0">
+        <span class="lbl">电量 <b id="batVal">78%</b></span>
+        <input type="range" id="batRange" min="0" max="100" value="78" style="width:150px">
+      </div>
+      <div class="btns" style="margin-top:8px">
+        <button id="batChg">切换充电状态</button>
+        <span class="hint" id="chgState" style="align-self:center">未充电</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>链路 / 环境</h2>
+      <div class="btns">
+        <button id="tglOnline">切换离线</button>
+        <button id="tglNight">切换夜间</button>
+      </div>
+      <p class="hint" style="margin-top:8px">
+        夜间 20:00–09:30 亮度降到 30%；<b>夜间碰一下屏幕就临时提亮 20 秒</b>，不动自动回落。<br>
+        离线时顶栏显示「离线」、列表置灰。在主界面<b>双击空白处</b>熄屏，点一下亮屏。
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>快捷场景</h2>
+      <div class="btns">
+        <button data-scene="idle">全部空闲</button>
+        <button data-scene="work">三个任务并行</button>
+        <button data-scene="confirm">需要确认</button>
+        <button data-scene="done">全部完成</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>审批规则</h2>
+      <p class="hint">
+        <b>多个任务同时要审批</b>：排队显示，一次处理一个。屏幕第二行是<b>任务名</b>，
+        右上角 <code>共 3 个</code> 表示队列里还有几个。<br>
+        <b>拒绝</b>：单击即可，误触只是重来一次。<br>
+        <b>批准</b>：必须按住 800ms，进度条走满才生效。<br>
+        <b>超时</b>：45 秒没操作，自动回退到电脑弹窗，<b>绝不自动放行</b>。
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>说明</h2>
+      <p class="hint">
+        画面坐标、颜色、字号和固件 <code>ui.cpp</code> 一一对应。<br>
+        中文在真机上用 12px 点阵字库，笔画会更像素化。
+      </p>
+    </div>
+  </div>
+</div>
+
+<script>
+const C = {
+  bg:'#000000', card:'#1C1F26', text:'#E8EAED', dim:'#9AA0A6',
+  mute:'#6B7280', red:'#E24B4A', blue:'#378ADD', green:'#639922',
+  amber:'#BA7517', line:'#2C2C2A', key:'#252830',
+  redBg:'#2A1416', greenBg:'#12240F'
+};
+const STATE = {
+  idle:     { cn:'空闲',     en:'IDLE',     c:C.mute  },
+  thinking: { cn:'思考中',   en:'THINKING', c:C.green },
+  working:  { cn:'执行中',   en:'WORKING',  c:C.blue  },
+  confirm:  { cn:'需要确认', en:'CONFIRM',  c:C.red   },
+  done:     { cn:'已完成',   en:'DONE',     c:C.green },
+  error:    { cn:'出错',     en:'ERROR',    c:C.amber }
+};
+const KB = ['1234567890','qwertyuiop','asdfghjkl.','zxcvbnm_-'];
+
+const cv = document.getElementById('scr');
+const ctx = cv.getContext('2d');
+ctx.scale(2, 2);
+
+const S = {
+  screen: 'main',
+  tasks: [
+    { label:'重构登录模块', state:'confirm', tool:'Bash', sec:38 },
+    { label:'写周报',       state:'working', tool:'Edit', sec:12 },
+    { label:'整理会议纪要', state:'working', tool:'Read', sec:5  },
+    { label:'复盘文档',     state:'done',    tool:'',     sec:120 }
+  ],
+  pass: '', shift: false, target: '',
+  msg:['',''], msgUntil: 0,
+  ap: null, aps: [],
+  batPct: 78, charging: false,
+  online: true, night: false, screenOff: false, boostUntil: 0,
+  lastTap: 0, lastTapX: -1, lastTapY: -1
+};
+
+function font(px, cn){ ctx.font = px + 'px ' + (cn ? '"PingFang SC","Microsoft YaHei",sans-serif' : '"SF Mono",Menlo,monospace'); }
+function txt(s,x,y,c,px=12,cn=true){ font(px,cn); ctx.fillStyle=c; ctx.textAlign='left'; ctx.textBaseline='alphabetic'; ctx.fillText(s,x,y); }
+function txtRight(s,xr,y,c,px=12,cn=true){ font(px,cn); ctx.fillStyle=c; ctx.textAlign='right'; ctx.textBaseline='alphabetic'; ctx.fillText(s,xr,y); }
+function txtCenter(s,cx,y,c,px=12,cn=true){ font(px,cn); ctx.fillStyle=c; ctx.textAlign='center'; ctx.textBaseline='alphabetic'; ctx.fillText(s,cx,y); }
+function rect(x,y,w,h,f){ ctx.fillStyle=f; ctx.fillRect(x,y,w,h); }
+function hline(y,c){ ctx.strokeStyle=c; ctx.lineWidth=0.5; ctx.beginPath(); ctx.moveTo(0,y+0.5); ctx.lineTo(240,y+0.5); ctx.stroke(); }
+
+function gear(cx,cy,r,c){
+  ctx.strokeStyle=c; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx,cy,r/3,0,Math.PI*2); ctx.stroke();
+  for(let i=0;i<6;i++){
+    const a=i*Math.PI/3;
+    ctx.beginPath();
+    ctx.moveTo(cx+Math.cos(a)*(r+1), cy+Math.sin(a)*(r+1));
+    ctx.lineTo(cx+Math.cos(a)*(r+4), cy+Math.sin(a)*(r+4));
+    ctx.stroke();
+  }
+}
+function back(x,y,c){
+  ctx.strokeStyle=c; ctx.lineWidth=1.4; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(x+10,y+4); ctx.lineTo(x+2,y+12); ctx.lineTo(x+10,y+20); ctx.stroke();
+}
+
+// ---------- 主界面 ----------
+function drawBattery(){
+  if(S.batPct < 0) return;
+  const bx=162, by=14, bw=22, bh=11;
+  const c = S.charging ? C.green
+          : (S.batPct<=10 ? C.red : (S.batPct<=25 ? C.amber : C.dim));
+  ctx.strokeStyle=c; ctx.lineWidth=1;
+  ctx.strokeRect(bx+0.5, by+0.5, bw-1, bh-1);
+  ctx.fillStyle=c; ctx.fillRect(bx+bw, by+3, 2, 5);
+
+  if(S.charging){
+    // 充电中：暗绿底 + 闪电
+    ctx.fillStyle='#102A12'; ctx.fillRect(bx+2, by+2, bw-4, bh-4);
+    ctx.strokeStyle=C.text; ctx.lineWidth=1; ctx.lineCap='round';
+    ctx.beginPath();
+    ctx.moveTo(bx+12, by+1); ctx.lineTo(bx+9, by+5);
+    ctx.lineTo(bx+12, by+5); ctx.lineTo(bx+9, by+10);
+    ctx.stroke();
+  } else {
+    const fw = Math.round((bw-4)*S.batPct/100);
+    if(fw>0) ctx.fillRect(bx+2, by+2, fw, bh-4);
+  }
+  txtRight(S.batPct + '%', bx-6, by+9, c, 11, false);
+}
+
+function drawMain(){
+  rect(0,0,240,240,C.bg);
+  // 顶栏优先级：离线 > 电量低 > 任务数
+  if(!S.online){
+    txt('离线', 14, 26, C.amber, 12);
+  } else if(S.batPct >= 0 && S.batPct <= 5 && !S.charging){
+    txt('电量低 请充电', 14, 26, C.red, 12);
+  } else {
+    txt(S.tasks.length + ' 个任务', 14, 26, C.text, 12);
+  }
+  drawBattery();
+  gear(224, 20, 9, C.dim);
+  hline(40, C.line);
+  if(!S.tasks.length){
+    txtCenter('空闲', 120, 120, C.dim, 12);
+    txtCenter('等待 WorkBuddy 任务', 120, 146, C.mute, 12);
+    return;
+  }
+  S.tasks.slice(0,4).forEach((t,i)=>{
+    const y = 44 + i*48;
+    const dead = !S.online;
+    const c = dead ? C.mute : STATE[t.state].c;
+    rect(12, y+8, 4, 32, c);
+    txt(t.label, 24, y+22, dead ? C.mute : C.text, 12);
+    txtRight(STATE[t.state].cn, 228, y+22, c, 12);
+    txt(t.tool ? (t.tool+'  '+t.sec+'s') : (t.sec+'s'), 24, y+40, C.mute, 11, false);
+  });
+}
+
+// ---------- WiFi ----------
+function drawWifi(){
+  rect(0,0,240,240,C.bg);
+  back(10,8,C.text);
+  txt('选择 WiFi', 38, 24, C.text, 12);
+  hline(40, C.line);
+  [{ssid:'Home-2.4G',enc:true},{ssid:'Office-WiFi',enc:true},{ssid:'Cafe-Free',enc:false}]
+  .forEach((it,i)=>{
+    const y = 46 + i*32;
+    rect(8, y, 224, 28, C.card);
+    txt(it.ssid, 18, y+19, C.text, 12, false);
+    if(it.enc) txtRight('锁', 224, y+19, C.mute, 12);
+  });
+}
+
+// ---------- 密码 ----------
+function drawPass(){
+  rect(0,0,240,240,C.bg);
+  back(10,8,C.text);
+  txt('输入密码', 38, 24, C.text, 12);
+  hline(40, C.line);
+  txt(S.target, 14, 60, C.dim, 12);
+  rect(8,68,224,34,C.card);
+  txt(S.pass.length>16 ? S.pass.slice(-16) : S.pass, 16, 90, C.text, 11, false);
+  for(let r=0;r<4;r++){
+    const y = 108 + r*28;
+    for(let c=0;c<10;c++){
+      let ch = KB[r][c];
+      if(S.shift && ch>='a' && ch<='z') ch = ch.toUpperCase();
+      const x = c*24;
+      rect(x+1, y, 22, 25, C.key);
+      txtCenter(ch, x+12, y+18, C.text, 12, false);
+    }
+  }
+  const fy = 222;
+  rect(4, fy, 48, 16, S.shift ? C.blue : C.key);
+  txtCenter('AB', 28, fy+13, C.text, 11, false);
+  rect(56, fy, 56, 16, C.key);
+  txtCenter('删除', 84, fy+13, C.text, 12);
+  rect(116, fy, 120, 16, C.blue);
+  txtCenter('连接', 176, fy+13, C.text, 12);
+}
+
+// ---------- 消息 ----------
+function drawMsg(){
+  rect(0,0,240,240,C.bg);
+  txtCenter(S.msg[0], 120, 110, C.text, 12);
+  if(S.msg[1]) txtCenter(S.msg[1], 120, 136, C.dim, 12);
+  const a = (Date.now()/1000*1.5) % (Math.PI*2);
+  for(let i=0;i<8;i++){
+    const ang = a + i*Math.PI/4;
+    ctx.beginPath();
+    ctx.arc(120+Math.cos(ang)*18, 168+Math.sin(ang)*18, i<3?2:1, 0, Math.PI*2);
+    ctx.fillStyle = i<3 ? C.text : C.mute; ctx.fill();
+  }
+}
+
+// ---------- 审批 ----------
+function wrap(s, maxW, px){
+  font(px, true);
+  const lines = []; let cur = '';
+  for(const ch of s){
+    if(ctx.measureText(cur+ch).width > maxW && cur){ lines.push(cur); cur = ch; }
+    else cur += ch;
+  }
+  if(cur) lines.push(cur);
+  return lines;
+}
+
+function drawApprove(){
+  const ap = S.aps[0];
+  if(!ap){ S.screen='main'; return; }
+  rect(0,0,240,240,C.bg);
+  const left = Math.max(0, Math.ceil((ap.deadline - Date.now())/1000));
+  txt('需要确认', 14, 26, C.red, 13);
+  txtRight(left + 's', 228, 26, left<=1 ? C.red : C.mute, 12, false);
+  hline(36, C.line);
+
+  // 哪个任务要审批
+  txtCenter(ap.label, 120, 58, C.text, 12);
+
+  // 工具名 + 队列里还有几个
+  txt(ap.tool, 14, 74, C.dim, 11, false);
+  if(S.aps.length > 1) txtRight('共 ' + S.aps.length + ' 个', 228, 74, C.amber, 12);
+
+  rect(8, 80, 224, 68, C.card);
+  const all = wrap(ap.cmd, 208, 11);
+  const shown = all.slice(0, 3);
+  if(all.length > 3) shown[2] = shown[2].slice(0, 28) + '...';
+  shown.forEach((ln,i)=> txt(ln, 16, 98 + i*18, C.text, 11, false));
+
+  // 只做提醒：决策在电脑客户端
+  rect(8, 156, 224, 62, C.card);
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1;
+  ctx.strokeRect(8.5, 156.5, 223, 61);
+  txtCenter('请在电脑上确认', 120, 182, C.amber, 13);
+  txtCenter('轻触屏幕关闭提示', 120, 206, C.mute, 12);
+
+}
+
+function draw(){
+  // 临时提亮到期 → 回落
+  if(S.boostUntil && Date.now() > S.boostUntil){ S.boostUntil = 0; applyBrightness(); }
+  if(S.screenOff){ rect(0,0,240,240,'#000000'); return; }
+  if(S.screen==='main') drawMain();
+  else if(S.screen==='wifi') drawWifi();
+  else if(S.screen==='pass') drawPass();
+  else if(S.screen==='approve') drawApprove();
+  else drawMsg();
+
+  if(S.screen==='msg' && Date.now() > S.msgUntil) S.screen='main';
+
+  if(S.screen==='approve'){
+    const ap = S.aps[0];
+    if(!ap){ S.screen='main'; }
+    else if(ap.decision === null && Date.now() > ap.deadline){
+      ap.decision = -1;
+      setTimeout(()=>{
+        S.aps.shift();
+        if(!S.aps.length) S.screen = 'main';
+      }, 1200);
+    }
+  }
+}
+setInterval(draw, 60);
+setInterval(()=>{ S.tasks.forEach(t=>{ if(t.state!=='idle' && t.state!=='confirm') t.sec++; }); }, 1000);
+
+// ---------- 触摸 ----------
+function pos(e){
+  const r = cv.getBoundingClientRect();
+  return { x:(e.clientX-r.left)/2, y:(e.clientY-r.top)/2 };
+}
+cv.addEventListener('pointerdown', e=>{
+  const {x,y} = pos(e);
+  // 夜间一碰就临时提亮，20 秒不动再回落
+  if(S.night){ S.boostUntil = Date.now() + 20000; applyBrightness(); }
+  handleTap(x,y);
+  applyBrightness();
+});
+
+function finishApproval(decision){
+  const ap = S.aps[0];
+  if(!ap) return;
+  ap.decision = decision;
+  setTimeout(()=>{
+    S.aps.shift();
+    if(!S.aps.length) S.screen = 'main';
+  }, 900);
+}
+
+function handleTap(x,y){
+  if(S.screenOff){ S.screenOff=false; applyBrightness(); return; }
+
+  if(S.screen==='main'){
+    if(x>200 && y<40){ S.screen='wifi'; return; }
+    // 双击空白处熄屏
+    if(Date.now()-S.lastTap < 400 &&
+       Math.abs(x-S.lastTapX)<50 && Math.abs(y-S.lastTapY)<50){
+      S.screenOff = true; S.lastTap = 0; applyBrightness(); return;
+    }
+    S.lastTap = Date.now(); S.lastTapX = x; S.lastTapY = y;
+    return;
+  }
+  if(S.screen==='wifi'){
+    if(x<38 && y<40){ S.screen='main'; return; }
+    for(let i=0;i<3;i++){
+      const ry = 46+i*32;
+      if(y>=ry && y<=ry+28){
+        S.target = ['Home-2.4G','Office-WiFi','Cafe-Free'][i];
+        S.pass=''; S.screen='pass'; return;
+      }
+    }
+    return;
+  }
+  if(S.screen==='pass'){
+    if(x<38 && y<40){ S.screen='main'; return; }
+    if(y>=220 && y<=238){
+      if(x<54){ S.shift=!S.shift; return; }
+      if(x<114){ S.pass = S.pass.slice(0,-1); return; }
+      S.msg=['正在连接',S.target]; S.msgUntil=Date.now()+1800; S.screen='msg'; return;
+    }
+    if(y<108 || y>=220) return;
+    const r = Math.floor((y-108)/28), c = Math.floor(x/24);
+    if(r>=0&&r<4&&c>=0&&c<10&&S.pass.length<32){
+      let ch = KB[r][c];
+      if(S.shift && ch>='a' && ch<='z') ch = ch.toUpperCase();
+      S.pass += ch;
+    }
+    return;
+  }
+  if(S.screen==='approve'){
+    const ap = S.aps[0];
+    if(ap && ap.decision === null) finishApproval(-3);  // 轻触任意位置关闭提示
+  }
+}
+
+// ---------- 控制面板 ----------
+const NAMES = ['重构登录模块','写周报','整理会议纪要','复盘文档','检查依赖','生成报告'];
+const DEMO = [
+  { label:'重构登录模块', tool:'Bash', cmd:'rm -rf build && npm run build' },
+  { label:'写周报',       tool:'Edit', cmd:'{"file":"reports/week42.md","content":"..."}' },
+  { label:'整理会议纪要', tool:'Bash', cmd:'python3 scripts/summarize.py --input meeting.txt' }
+];
+
+function pushApproval(item){
+  if(S.aps.length >= 3) return;
+  S.aps.push({ ...item, deadline: Date.now() + 3000, decision: null });
+  S.screen = 'approve';
+}
+
+function renderList(){
+  const box = document.getElementById('taskList');
+  if(!S.tasks.length){
+    box.innerHTML = '<div class="row"><span class="lbl" style="color:#9aa0a6">暂无任务</span></div>';
+    return;
+  }
+  box.innerHTML = S.tasks.map((t,i)=>`
+    <div class="row">
+      <span class="dot" style="background:${STATE[t.state].c}"></span>
+      <span class="lbl">${t.label}</span>
+      <select data-i="${i}">
+        ${Object.keys(STATE).map(k=>`<option value="${k}"${k===t.state?' selected':''}>${STATE[k].cn}</option>`).join('')}
+      </select>
+      <button class="del" data-del="${i}">×</button>
+    </div>`).join('');
+  box.querySelectorAll('select').forEach(s=>{
+    s.onchange = ev=>{ S.tasks[+ev.target.dataset.i].state = ev.target.value; renderList(); };
+  });
+  box.querySelectorAll('[data-del]').forEach(b=>{
+    b.onclick = ev=>{ S.tasks.splice(+ev.target.dataset.del,1); renderList(); };
+  });
+}
+
+const batRange = document.getElementById('batRange');
+const batVal = document.getElementById('batVal');
+
+// 模拟背光：夜间基线 → 触摸临时提亮 → 低电量压低 → 熄屏归零
+function applyBrightness(){
+  if(S.screenOff){ cv.style.filter = 'brightness(0)'; return; }
+  const boost = S.boostUntil && Date.now() < S.boostUntil;
+  let bl = (S.night && !boost) ? 0.30 : 1;
+  if(!S.charging){
+    let cap = 1;
+    if(S.batPct <= 5) cap = 0.18;
+    else if(S.batPct <= 10) cap = 0.39;
+    else if(S.batPct <= 20) cap = 0.67;
+    if(cap < bl) bl = cap;
+  }
+  cv.style.filter = bl < 1 ? 'brightness(' + bl + ')' : '';
+}
+
+batRange.oninput = ()=>{
+  S.batPct = +batRange.value;
+  batVal.textContent = S.batPct + '%';
+  applyBrightness();
+};
+document.getElementById('batChg').onclick = ()=>{
+  S.charging = !S.charging;
+  document.getElementById('chgState').textContent = S.charging ? '充电中' : '未充电';
+  applyBrightness();
+};
+
+document.getElementById('tglOnline').onclick = ()=>{
+  S.online = !S.online;
+  document.getElementById('tglOnline').textContent = S.online ? '切换离线' : '恢复在线';
+};
+document.getElementById('tglNight').onclick = ()=>{
+  S.night = !S.night;
+  document.getElementById('tglNight').textContent = S.night ? '退出夜间' : '切换夜间';
+  applyBrightness();
+};
+
+document.getElementById('addTask').onclick = ()=>{
+  if(S.tasks.length >= 4) return;
+  S.tasks.push({ label:NAMES[S.tasks.length%NAMES.length], state:'working', tool:'Bash', sec:0 });
+  renderList();
+};
+
+document.getElementById('demoApprove').onclick = ()=>{
+  pushApproval(DEMO[0]);
+};
+
+document.getElementById('demoThree').onclick = ()=>{
+  S.aps = DEMO.map(d=>({ ...d, deadline: Date.now()+3000, decision: null }));
+  S.screen = 'approve';
+};
+
+document.querySelectorAll('[data-scene]').forEach(b=>{
+  b.onclick = ()=>{
+    const s = b.dataset.scene;
+    if(s==='idle') S.tasks = [];
+    if(s==='work') S.tasks = [
+      {label:'重构登录模块', state:'working', tool:'Bash', sec:12},
+      {label:'写周报',       state:'working', tool:'Edit', sec:5 },
+      {label:'整理会议纪要', state:'done',    tool:'',     sec:60}
+    ];
+    if(s==='confirm') S.tasks = [
+      {label:'重构登录模块', state:'confirm', tool:'Bash', sec:38},
+      {label:'写周报',       state:'working', tool:'Edit', sec:12}
+    ];
+    if(s==='done') S.tasks = [
+      {label:'重构登录模块', state:'done', tool:'', sec:8},
+      {label:'写周报',       state:'done', tool:'', sec:20}
+    ];
+    S.screen='main'; renderList();
+  };
+});
+
+renderList();
+applyBrightness();
+draw();
+</script>
+</body>
+</html>

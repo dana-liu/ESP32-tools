@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Arduino 编译产物
+build/
+*.bin
+*.elf
+*.map
+
+# 编辑器
+.vscode/
+.idea/
+*.swp

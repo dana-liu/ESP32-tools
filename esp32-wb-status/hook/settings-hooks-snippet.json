@@ -1,0 +1,78 @@
+{
+  "_说明": "把下面 hooks 里的条目合并进 ~/.workbuddy-ai/settings.json 的 hooks 字段（不是覆盖）。你现有的 vibe-island 条目保留不动。改完必须到 /hooks 面板确认才会生效。",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 $HOME/workspace/ESP32-tools/esp32-wb-status/hook/wb-status-hook.py"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 $HOME/workspace/ESP32-tools/esp32-wb-status/hook/wb-status-hook.py"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 $HOME/workspace/ESP32-tools/esp32-wb-status/hook/wb-status-hook.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 $HOME/workspace/ESP32-tools/esp32-wb-status/hook/wb-status-hook.py"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 $HOME/workspace/ESP32-tools/esp32-wb-status/hook/wb-status-hook.py"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 $HOME/workspace/ESP32-tools/esp32-wb-status/hook/wb-status-hook.py"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 $HOME/workspace/ESP32-tools/esp32-wb-status/hook/wb-status-hook.py"
+          }
+        ]
+      }
+    ]
+  }
+}
