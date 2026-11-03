@@ -29,6 +29,7 @@ serial_push.py —— 把钉钉日程通过 USB 串口推给 ESP32 时钟
     python3 serial_push.py --once       # 推一次就退出（调试用）
     python3 serial_push.py --vol 60     # 设音量
     python3 serial_push.py --beep       # 让设备响一次
+    python3 serial_push.py --bl 12      # 固定背光亮度（0-100），--bl auto 恢复自动
 
 环境变量：
     CLOCK_BRIDGE         桥接地址，默认 http://127.0.0.1:8787
@@ -352,6 +353,9 @@ def main():
         return one_shot(port, "SND|%d" % (1 if on else 0))
     if "--beep" in sys.argv:
         return one_shot(port, "BEEP")
+    if "--bl" in sys.argv:
+        v = sys.argv[sys.argv.index("--bl") + 1]
+        return one_shot(port, "BL|%s" % v)
 
     fd = open_port(port)
     print("已连接 %s" % port)

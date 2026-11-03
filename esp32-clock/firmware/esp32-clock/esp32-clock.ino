@@ -311,6 +311,68 @@ void ringPopup() {
 
 void stopPopupRing() { popupBeeps = 0; }
 
+// ---------------- 背光：夜间调光 + 熄屏 ----------------
+// GPIO46 接背光，走 PWM。规则：
+//   1. 20:00~次日 09:00 默认调暗（夜里当小夜灯刚好）；
+//      这段时间内碰到屏幕或按任意键，恢复全亮 30 秒，到期自动暗回去
+//   2. 长按静音键(GPIO5) 0.8 秒熄屏；熄屏时触摸或按任意键点亮
+#define BL_FREQ             5000    // 背光 PWM 频率
+#define BL_RES              8       // 8bit: 0..255
+#define BL_DAY              255     // 平时全亮
+#define BL_NIGHT            30      // 夜间亮度（约 12%），嫌暗/嫌亮改这里
+#define BL_BOOST_MS         30000UL // 夜间触碰后恢复正常的时长
+#define SCREEN_OFF_HOLD_MS  800UL   // 静音键长按多久算「熄屏」
+
+bool blPwmOk   = false;             // ledcAttach 失败就退回直连全亮
+int  blForce   = -1;                // -1=自动；0..255 由串口 BL| 固定（调试用）
+int  blLevel   = -1;                // 当前输出亮度，变了才写 LEDC
+bool screenOff = false;             // 熄屏中（触摸/任意键点亮）
+unsigned long blBoostUntil = 0;     // 夜间临时提亮的截止时刻
+
+// 20:00 到次日 09:00 之间算夜间。用设备自己的 RTC（USB 对时/NTP/演示时钟都行），
+// 不联网也能正确切换。
+bool isNightNow() {
+  time_t t = nowEpoch();
+  struct tm tm;
+  localtime_r(&t, &tm);
+  int hm = tm.tm_hour * 100 + tm.tm_min;
+  return hm >= 2000 || hm < 900;
+}
+
+void applyBrightness() {
+  if (!blPwmOk) return;
+  int want;
+  if (blForce >= 0) {
+    want = blForce;                 // 串口调试强制值优先
+  } else if (screenOff) {
+    want = 0;
+  } else if (isNightNow() && millis() >= blBoostUntil) {
+    want = BL_NIGHT;                // 夜间且 30 秒提亮已过期
+  } else {
+    want = BL_DAY;
+  }
+  if (want != blLevel) {
+    blLevel = want;
+    ledcWrite(GFX_BL, blLevel);
+    DBG("[bl] %d%%\n", blLevel * 100 / 255);
+  }
+}
+
+// 夜间被碰了一下：提亮 30 秒。白天调它没有副作用（本来就全亮）。
+void boostBacklight() {
+  blBoostUntil = millis() + BL_BOOST_MS;
+  applyBrightness();
+}
+
+// 熄屏 -> 点亮。点亮同时按夜间规则提亮 30 秒。
+void wakeScreen() {
+  if (screenOff) {
+    screenOff = false;
+    DBG("[bl] 点亮\n");
+  }
+  boostBacklight();
+}
+
 // ---------------- 天气图标 ----------------
 void drawWeatherIcon(int cx, int cy, const char* icon) {
   if (!strcmp(icon, "rain") || !strcmp(icon, "snow") || !strcmp(icon, "thunder") ||
@@ -1000,6 +1062,10 @@ void handleLine(char* s) {
       char dk[16];
       snprintf(dk, sizeof(dk), "%04d-%02d-%02d", lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday);
       Serial.printf("STATE|local|%s|%s\n", dk, weekCN(lt.tm_wday));
+      // 背光状态：当前级别 / 设备时间 / 是否夜间 / 是否熄屏 —— 调夜间调光用
+      Serial.printf("STATE|bl|%d|%02d:%02d|%d|%d\n", blLevel,
+                    lt.tm_hour, lt.tm_min, isNightNow() ? 1 : 0,
+                    screenOff ? 1 : 0);
     }
     Serial.println("STATE|ok");
     return;
@@ -1016,6 +1082,24 @@ void handleLine(char* s) {
   if (!strncmp(s, "SND|", 4)) {
     setSoundOn(atoi(s + 4) != 0);
     Serial.printf("OK %d\n", soundOn ? 1 : 0);
+    linkTouch();
+    return;
+  }
+
+  // 背光调试：BL|<0-100> 固定亮度，BL|auto 恢复自动。
+  // 白天测夜间调光不用等到 20:00。
+  if (!strncmp(s, "BL|", 3)) {
+    const char* v = s + 3;
+    if (!strcmp(v, "auto")) {
+      blForce = -1;
+      Serial.println("OK auto");
+    } else {
+      int pct = atoi(v);
+      blForce = pct <= 0 ? 0 : (pct > 100 ? 255 : pct * 255 / 100);
+      Serial.printf("OK %d\n", pct);
+    }
+    blBoostUntil = 0;
+    applyBrightness();
     linkTouch();
     return;
   }
@@ -1185,7 +1269,13 @@ void setup() {
   delay(200);
   pinMode(BAT_EN, OUTPUT); digitalWrite(BAT_EN, HIGH);
   if (!gfx->begin()) Serial.println("[gfx] begin failed");
-  pinMode(GFX_BL, OUTPUT); digitalWrite(GFX_BL, HIGH);
+  // 背光走 PWM（夜间调光/熄屏都需要）。attach 失败就退回直连全亮。
+  blPwmOk = ledcAttach(GFX_BL, BL_FREQ, BL_RES);
+  if (!blPwmOk) {
+    Serial.println("[bl] ledcAttach 失败，背光直连全亮");
+    pinMode(GFX_BL, OUTPUT);
+    digitalWrite(GFX_BL, HIGH);
+  }
   gfx->setUTF8Print(true);
   gfx->setTextWrap(false);
   Preferences ui;
@@ -1209,6 +1299,7 @@ void setup() {
   audioSetVolume(soundOn ? volumePct : 0);
   setenv("TZ", "CST-8", 1);
   tzset();
+  applyBrightness();                // TZ 就绪后按夜间规则定初始亮度
 
   // 演示起点: 2026-11-02 19:03 周一
   struct tm tm = {0};
@@ -1254,6 +1345,7 @@ void setup() {
 
 void loop() {
   linkLoop();
+  applyBrightness();   // 每轮算一次目标亮度（夜间 30 秒提亮到期会自动暗回去）
 
   time_t t = nowEpoch();
   struct tm tm;
@@ -1329,6 +1421,7 @@ void loop() {
   static unsigned long lastTouchCheck = 0;
   static unsigned long touchStartMs = 0;
   static unsigned long lastTouchErrPrint = 0;
+  static bool touchWasWake = false;   // 这次按下是用来点屏的，抬指时不触发手势
   if (millis() - lastTouchCheck > 60) {
     lastTouchCheck = millis();
     if (touchErr && millis() - lastTouchErrPrint > 5000) {
@@ -1341,6 +1434,12 @@ void loop() {
     if (touching && !wasTouch) {
       startX = lastX = x; startY = lastY = y;
       touchStartMs = millis();
+      if (screenOff) {
+        wakeScreen();                 // 熄屏中：这次触摸只负责点亮
+        touchWasWake = true;
+      } else {
+        boostBacklight();             // 夜间调光被碰了：提亮 30 秒
+      }
       DBG("[touch] down %d,%d\n", x, y);
     } else if (touching) {
       lastX = x; lastY = y;
@@ -1348,13 +1447,20 @@ void loop() {
       // 命中判定用「按下点」：抬指那一帧的坐标可能是 0,0 或抖动值，
       // 用它做命中会导致「点了没反应」。
       DBG("[touch] up %d,%d (down %d,%d)\n", lastX, lastY, startX, startY);
-      handleGesture(lastX - startX, lastY - startY, startX, startY, millis() - touchStartMs);
+      if (touchWasWake) {
+        DBG("[touch] 点亮用的触摸，忽略手势\n");
+      } else {
+        handleGesture(lastX - startX, lastY - startY, startX, startY, millis() - touchStartMs);
+      }
+      touchWasWake = false;
     }
     wasTouch = touching;
   }
 
-  // 板载按键：GPIO4 音量+ / GPIO0 音量- / GPIO5 静音
+  // 板载按键：GPIO4 音量+ / GPIO0 音量- / GPIO5 静音(短按)，静音长按熄屏
   static bool kUp = false, kDown = false, kMute = false;
+  static unsigned long muteDownMs = 0;
+  static bool muteLongFired = false;
   static unsigned long lastKeyCheck = 0;
   if (millis() - lastKeyCheck > 40) {
     lastKeyCheck = millis();
@@ -1363,7 +1469,12 @@ void loop() {
     bool mute = digitalRead(KEY_MUTE)     == LOW;
     bool pressed = (up && !kUp) || (down && !kDown) || (mute && !kMute);
 
-    if (pressed && screen == SC_POPUP) {
+    if (screenOff) {
+      // 熄屏中：任何按键都只负责点亮，这一次事件不再执行别的动作
+      if (pressed) wakeScreen();
+      if (!mute && kMute) { muteDownMs = 0; muteLongFired = false; }
+    } else if (pressed && screen == SC_POPUP) {
+      boostBacklight();
       char key[16];
       eventKey(popupIdx, key, sizeof(key));
       strlcpy(ackKey, key, sizeof(ackKey));
@@ -1373,21 +1484,40 @@ void loop() {
       forceRender = true;
     } else {
       if (up && !kUp) {
+        boostBacklight();
         DBG("[key] GPIO%d 音量+ -> ", KEY_VOL_UP);
         applyVolume(volumePct + 5);
         DBG("%d%%\n", volumePct);
         if (soundOn) audioTick();
       }
       if (down && !kDown) {
+        boostBacklight();
         DBG("[key] GPIO%d 音量- -> ", KEY_VOL_DOWN);
         applyVolume(volumePct - 5);
         DBG("%d%%\n", volumePct);
         if (soundOn) audioTick();
       }
+      // 静音键：短按=静音切换，长按 0.8 秒=熄屏
       if (mute && !kMute) {
-        DBG("[key] GPIO%d 静音切换\n", KEY_MUTE);
-        setSoundOn(!soundOn);
-        if (soundOn) audioTick();
+        muteDownMs = millis();
+        muteLongFired = false;
+      }
+      if (mute && muteDownMs && !muteLongFired &&
+          millis() - muteDownMs >= SCREEN_OFF_HOLD_MS) {
+        muteLongFired = true;
+        screenOff = true;
+        applyBrightness();             // 立刻熄屏，不等 loop 下一轮
+        DBG("[bl] 熄屏（长按静音键）\n");
+      }
+      if (!mute && kMute) {            // 松开
+        if (muteDownMs && !muteLongFired) {
+          boostBacklight();
+          DBG("[key] GPIO%d 静音切换\n", KEY_MUTE);
+          setSoundOn(!soundOn);
+          if (soundOn) audioTick();
+        }
+        muteDownMs = 0;
+        muteLongFired = false;
       }
     }
     kUp = up; kDown = down; kMute = mute;
