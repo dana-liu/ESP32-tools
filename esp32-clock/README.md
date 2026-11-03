@@ -330,7 +330,7 @@ arduino-cli upload  -p /dev/cu.usbmodem* --fqbn "$FQBN" firmware/esp32-clock
 ```
 
 ⚠️ **必须带 `PartitionScheme=app3M_fat9M_16MB`**。默认 1.31MB 分区会到 98%，
-加一行就爆。当前占用：Flash **1,632,563 字节（51%）**，RAM 50,396 字节（15%）。
+加一行就爆。当前占用：Flash **1,641,338 字节（52%）**，RAM 50,572 字节（15%）。
 
 依赖库（已在 arduino-user 内）：GFX Library for Arduino **1.6.9**、U8g2、ArduinoJson。
 esp32 core 3.3.12。

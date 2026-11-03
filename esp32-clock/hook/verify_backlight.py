@@ -105,6 +105,8 @@ def main():
     # ---- 1. 同步时钟，看当前时段的自动亮度 ----
     send(fd, "TIME|%d" % int(time.time()))
     drain(fd)
+    send(fd, "BL|auto")      # 先清掉上次测试可能留下的 BL| 强制值，保证测的是自动规则
+    drain(fd)
     time.sleep(0.5)
     st = read_bl(fd)
     if not st:

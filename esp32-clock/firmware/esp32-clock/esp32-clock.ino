@@ -1299,7 +1299,6 @@ void setup() {
   audioSetVolume(soundOn ? volumePct : 0);
   setenv("TZ", "CST-8", 1);
   tzset();
-  applyBrightness();                // TZ 就绪后按夜间规则定初始亮度
 
   // 演示起点: 2026-11-02 19:03 周一
   struct tm tm = {0};
@@ -1307,6 +1306,10 @@ void setup() {
   tm.tm_hour = 19; tm.tm_min = 3; tm.tm_wday = 1;
   baseEpoch = mktime(&tm);
   baseMillis = millis();
+  // 必须在 baseEpoch 就位之后：nowEpoch() = baseEpoch + 走时，
+  // baseEpoch 还是 0 的时候算出来是 1970 年早上 8 点，会被误判成夜间，
+  // 背光带着错误亮度熬过整个 WiFi/NTP 连接窗口（最长 25 秒）才被 loop 纠正。
+  applyBrightness();
 
   String ssid = WIFI_SSID, pass = WIFI_PASS;
   if (ssid.isEmpty() && loadWifiFromNVS(ssid, pass)) {
