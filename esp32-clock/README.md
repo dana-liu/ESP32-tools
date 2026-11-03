@@ -194,16 +194,19 @@ STATE|ok
 
 ### 实机验证脚本
 
-`hook/` 下三个脚本都直接跑真硬件，改完固件过一遍：
+`hook/` 下五个脚本，改完固件过一遍：
 
 ```bash
-python3 hook/verify_utf8.py       # 中文有没有被截断（26 项逐字节比对）
-python3 hook/verify_rollover.py   # 过 0 点会不会自动切换（4 个阶段）
-python3 hook/verify_roundtrip.py  # 桥接→推送→设备 端到端（27 项逐字段比对）
+python3 hook/verify_utf8.py          # 中文有没有被截断（26 项逐字节比对）
+python3 hook/verify_rollover.py      # 过 0 点会不会自动切换（4 个阶段）
+python3 hook/verify_roundtrip.py     # 桥接→推送→设备 端到端（27 项逐字段比对）
+python3 hook/verify_backlight.py     # 夜间调光/BL| 命令（10 项，拨时钟模拟夜间）
+python3 hook/test_backlight_logic.py # 背光状态机宿主机测试（30 项，不需要板子）
 ```
 
-三个脚本都会**先对时**再测（`TIME|<now>`），不依赖设备上残留的旧时间，
-可以随便顺序跑、重复跑。
+前四个都会**先对时**再测（`TIME|<now>`），不依赖设备上残留的旧时间，
+可以随便顺序跑、重复跑。`test_backlight_logic.py` 把固件背光决策逻辑
+逐行镜像成 Python 跑场景矩阵，板子不在手边时也能先验证逻辑。
 
 ### 按键排查
 
@@ -331,7 +334,7 @@ arduino-cli upload  -p /dev/cu.usbmodem* --fqbn "$FQBN" firmware/esp32-clock
 ```
 
 ⚠️ **必须带 `PartitionScheme=app3M_fat9M_16MB`**。默认 1.31MB 分区会到 98%，
-加一行就爆。当前占用：Flash **1,641,338 字节（52%）**，RAM 50,572 字节（15%）。
+加一行就爆。当前占用：Flash **1,641,382 字节（52%）**，RAM 50,572 字节（15%）。
 
 依赖库（已在 arduino-user 内）：GFX Library for Arduino **1.6.9**、U8g2、ArduinoJson。
 esp32 core 3.3.12。
@@ -412,6 +415,10 @@ gfx->flushBand(41, 108);                   // 只推某一段，用于走秒
 - **`strlcpy()` 会从字节边界截断**，中文一个 3 字节，切一刀就是半个汉字 ——
   一律用 `copyUtf8()` 按字符边界截断
 - **`tm_mday` 判换日跨月会错**：用完整的 `YYYYMMDD` 当日期键
+- **setup() 里用 `nowEpoch()` 前必须先把 `baseEpoch` 赋好**：`nowEpoch() =
+  baseEpoch + 走时`，`baseEpoch` 还是 0 时算出来是 1970 年早上 8 点 ——
+  背光初版因此被误判成夜间，白天开机带着 12% 亮度熬过整个 WiFi/NTP
+  窗口（最长 25 秒）。任何依赖「当前时间」的初始化都要排在时钟起点之后
 
 ## 已知限制
 
