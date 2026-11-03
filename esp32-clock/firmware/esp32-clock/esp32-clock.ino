@@ -291,6 +291,10 @@ void applyVolume(int v) {
   volToastUntil = millis() + VOL_TOAST_MS;   // 顶部浮层显示 1 秒
   drawVolumeToast();                         // 立刻显示，不等下一帧
   gfx->flushBand(0, 48);
+  // 调完放一声「试听音」：频率/幅度与提醒音一致，听到的响度就是提醒的响度，
+  // 比 35ms 的短促声好判断。音量 0 或静音时自动不出声。
+  // 放在 applyVolume 里，按键和串口 VOL| 两个入口都能听到。
+  if (soundOn) audioPreviewVolume();
 }
 
 void setSoundOn(bool on) {
@@ -1489,16 +1493,14 @@ void loop() {
       if (up && !kUp) {
         boostBacklight();
         DBG("[key] GPIO%d 音量+ -> ", KEY_VOL_UP);
-        applyVolume(volumePct + 5);
+        applyVolume(volumePct + 5);      // 试听音在 applyVolume 里放
         DBG("%d%%\n", volumePct);
-        if (soundOn) audioTick();
       }
       if (down && !kDown) {
         boostBacklight();
         DBG("[key] GPIO%d 音量- -> ", KEY_VOL_DOWN);
         applyVolume(volumePct - 5);
         DBG("%d%%\n", volumePct);
-        if (soundOn) audioTick();
       }
       // 静音键：短按=静音切换，长按 0.8 秒=熄屏
       if (mute && !kMute) {

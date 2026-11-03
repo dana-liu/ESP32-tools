@@ -152,3 +152,12 @@ void audioTick() {
   if (!s_ready || s_volume <= 0) return;
   playSine(1760.0f, 35, 0.30f);
 }
+
+// 音量调节的试听音：比 audioTick 长得多，能听出大小。
+// 频率(880Hz)和幅度(0.42)与提醒音(audioChime)的第一个音一致 ——
+// 这一声听到的响度，就是将来日程提醒的响度，直接用来判断音量合不合适。
+// 音量为 0 或静音时自动不出声（playSine 里挡掉了）。
+void audioPreviewVolume() {
+  if (!s_ready || s_volume <= 0) return;
+  playSine(880.0f, 250, 0.42f);
+}

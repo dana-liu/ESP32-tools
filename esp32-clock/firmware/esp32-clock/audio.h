@@ -16,3 +16,4 @@ int  audioVolume();             // 当前音量
 void audioTone(uint16_t freq, uint16_t ms);
 void audioChime();              // 日程提醒：三声上行
 void audioTick();               // 操作反馈：极短一声
+void audioPreviewVolume();      // 音量试听：较长一声，用来判断音量是否合适
