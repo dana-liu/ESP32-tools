@@ -15,3 +15,12 @@ build/
 .vscode/
 .idea/
 *.swp
+
+# 项目内隔离的 Arduino 库（78MB，按各项目 README 自行准备）
+esp32-clock/arduino-user/
+
+# Python 虚拟环境
+**/.venv/
+
+# 固件本地凭据（模板见 secrets.example.h）
+**/secrets.h

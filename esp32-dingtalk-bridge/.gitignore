@@ -1,0 +1,6 @@
+config.json
+.token_cache.json
+.events_cache.json
+__pycache__/
+.weather_cache.json
+.venv/

@@ -1,0 +1,20 @@
+{
+  "mode": "caldav",
+  "caldav_url": "手机钉钉 -> 日历 -> 设置 -> 日历设置 -> CalDAV 同步 生成的服务器地址",
+  "caldav_username": "CalDAV 用户名",
+  "caldav_password": "CalDAV 专用密码",
+  "app_key": "仅 mode=open_api 时必填: 钉钉企业内部应用 AppKey",
+  "app_secret": "仅 mode=open_api 时必填: AppSecret",
+  "user_id": "仅 mode=open_api 时必填: 你的钉钉 userId",
+  "calendar_id": "primary",
+  "weather_enabled": true,
+  "weather_city": "北京·朝阳",
+  "weather_lat": 39.9219,
+  "weather_lon": 116.4435,
+  "weather_interval_seconds": 1800,
+  "sync_interval_seconds": 600,
+  "days_ahead": 2,
+  "host": "0.0.0.0",
+  "port": 8787,
+  "bridge_token": ""
+}

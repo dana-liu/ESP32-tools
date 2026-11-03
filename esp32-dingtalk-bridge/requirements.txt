@@ -1,0 +1,4 @@
+flask>=3.0
+requests>=2.31
+caldav>=1.4
+zhdate>=1.1
