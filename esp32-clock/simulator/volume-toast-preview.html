@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>ESP32 时钟 · 音量浮层预览</title>
+<style>
+  :root{
+    --bg:#f7f5ef; --card:#efece3; --line:#dedbd3; --text:#2c2c2a;
+    --muted:#5f5e5a; --accent:#993c1d; --orange:#d85a30;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:32px 20px;background:#faf9f6;color:var(--text);
+       font-family:Arial,"PingFang SC","Microsoft YaHei",sans-serif}
+  h1{font-size:16px;font-weight:600;margin:0 0 4px}
+  p.cap{font-size:12px;color:var(--muted);margin:0 0 22px}
+  .wrap{display:flex;flex-wrap:wrap;gap:32px;align-items:flex-start}
+  .bezel{padding:9px;background:#efeee9;border:.5px solid #d3d1c7;border-radius:14px}
+  canvas{display:block;width:312px;height:312px;border-radius:6px;image-rendering:pixelated}
+  .panel{min-width:220px;font-size:13px;color:var(--muted)}
+  .panel h2{font-size:12px;font-weight:600;color:var(--text);margin:0 0 8px}
+  .row{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
+  button{font:400 12px inherit;padding:7px 12px;border:.5px solid #d3d1c7;border-radius:8px;
+         background:#fff;color:#444441;cursor:pointer}
+  button:hover{background:#f3f1ea}
+  .hint{font-size:12px;line-height:1.7;color:var(--muted);border-top:.5px solid #e6e3da;padding-top:12px}
+  code{background:#efeee9;padding:1px 4px;border-radius:4px;font-size:11px}
+</style>
+</head>
+<body>
+<h1>音量浮层（设备实际尺寸 240×240）</h1>
+<p class="cap">按板载音量键时，页面顶部弹出一个深色胶囊显示当前音量，<b>1 秒后自动消失</b>，不切屏。</p>
+
+<div class="wrap">
+  <div class="bezel"><canvas id="cv" width="240" height="240"></canvas></div>
+
+  <div class="panel">
+    <h2>模拟按键</h2>
+    <div class="row">
+      <button id="minus">音量 −</button>
+      <button id="plus">音量 +</button>
+      <button id="mute">静音切换</button>
+    </div>
+    <div class="row">
+      <button id="chime">试听提示音</button>
+    </div>
+    <div class="hint">
+      设备上：<code>KEY2</code>(GPIO5) −5%、<code>KEY1</code>(GPIO4) +5%、
+      <code>BOOT</code>(GPIO0) 静音切换。<br>
+      串口也能调：<code>VOL|60</code> <code>SND|1</code> <code>BEEP</code>，同样会弹这个浮层。
+    </div>
+  </div>
+</div>
+
+<script>
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const C = {bg:'#f7f5ef', card:'#efece3', line:'#dedbd3', text:'#2c2c2a',
+           muted:'#5f5e5a', accent:'#993c1d', orange:'#d85a30'};
+
+let vol = 60, snd = true, toastUntil = 0;
+
+function rr(x,y,w,h,r,fill,stroke){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);
+  ctx.arcTo(x,y,x+w,y,r);
+  ctx.closePath();
+  if(fill){ctx.fillStyle=fill;ctx.fill();}
+  if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=1;ctx.stroke();}
+}
+function txt(s,x,y,size,color,align){
+  ctx.fillStyle=color;
+  ctx.font = size+'px Arial,"PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.textAlign = align||'left';
+  ctx.fillText(s,x,y);
+  ctx.textAlign='left';
+}
+
+// ---- 主屏（简化版，够看出浮层位置）----
+function drawMain(){
+  ctx.fillStyle=C.bg; ctx.fillRect(0,0,240,240);
+  txt('11月03日',16,28,13,'#444441');
+  txt('周二',104,28,12,C.muted);
+  rr(180,14,44,19,5,C.card);
+  txt('USB',202,28,10,C.accent,'center');
+  ctx.strokeStyle=C.line; ctx.beginPath(); ctx.moveTo(16,40); ctx.lineTo(224,40); ctx.stroke();
+
+  txt('11:35',120,120,76,C.text,'center');
+
+  txt('北京时间',16,143,11,C.muted);
+  ctx.fillStyle=C.orange; ctx.beginPath(); ctx.arc(181,139,2,0,7); ctx.fill();
+  txt('27 秒',224,143,12,C.accent,'right');
+  ctx.strokeStyle=C.line; ctx.beginPath(); ctx.moveTo(16,153); ctx.lineTo(224,153); ctx.stroke();
+
+  ctx.strokeStyle=C.line; ctx.beginPath(); ctx.arc(29,173,9,0,7); ctx.stroke();
+  txt('天气暂未同步',49,178,11,C.muted);
+  txt('等待天气数据',49,195,11,C.muted);
+
+  rr(16,201,208,38,7,C.card);
+  ctx.fillStyle=C.muted; ctx.fillRect(16,207,2,26);
+  txt('19:30 · 钉钉',26,215,11,C.accent);
+  txt('备赛课二期提测',26,232,12,C.text);
+}
+
+// ---- 音量浮层：132×40 深色胶囊 + 进度条 ----
+function drawToast(){
+  const w=132,h=40,x=54,y=6;
+  rr(x,y,w,h,12,C.text);
+  const label = !snd ? '已静音' : (vol===0 ? '音量 0%' : '音量 '+vol+'%');
+  txt(label,120,y+20,12,C.bg,'center');
+  const bx=x+14, bw=w-28;
+  rr(bx,y+27,bw,4,2,C.muted);
+  const fill = snd ? Math.round(bw*vol/100) : 0;
+  if(fill>0) rr(bx,y+27,Math.max(4,fill),4,2,C.bg);
+}
+
+function draw(){
+  drawMain();
+  if(Date.now() < toastUntil) drawToast();
+}
+
+function showToast(){ toastUntil = Date.now()+1000; draw(); }
+
+// ---- 声音（与固件同频）----
+let actx=null;
+function ac(){ actx = actx || new (window.AudioContext||window.webkitAudioContext)(); return actx; }
+function tone(freq,dur,at,amp){
+  const a=ac(), o=a.createOscillator(), g=a.createGain();
+  o.type='sine'; o.frequency.value=freq;
+  g.gain.setValueAtTime(0, a.currentTime+at);
+  g.gain.linearRampToValueAtTime(amp, a.currentTime+at+0.005);
+  g.gain.setValueAtTime(amp, a.currentTime+at+dur-0.005);
+  g.gain.linearRampToValueAtTime(0, a.currentTime+at+dur);
+  o.connect(g); g.connect(a.destination);
+  o.start(a.currentTime+at); o.stop(a.currentTime+at+dur+0.02);
+}
+function chime(){ if(!snd||vol<=0) return;
+  const amp=0.45*(vol/100)*0.6;
+  tone(880,0.11,0,amp); tone(1174.7,0.11,0.15,amp); tone(1568,0.17,0.30,amp); }
+function tick(){ if(!snd||vol<=0) return; tone(1760,0.035,0,0.25*(vol/100)); }
+
+document.getElementById('minus').onclick = ()=>{ vol=Math.max(0,vol-5); tick(); showToast(); };
+document.getElementById('plus').onclick  = ()=>{ vol=Math.min(100,vol+5); tick(); showToast(); };
+document.getElementById('mute').onclick  = ()=>{ snd=!snd; tick(); showToast(); };
+document.getElementById('chime').onclick = chime;
+
+setInterval(draw, 120);   // 1 秒到期后自动擦掉浮层
+draw();
+</script>
+</body>
+</html>

@@ -15,11 +15,20 @@
 #include <time.h>
 #include <sys/time.h>
 #include "secrets.h"
+#include "audio.h"
 
 #define GFX_BL 46
 #define BAT_EN 2
 #define TP_SDA 42
 #define TP_SCL 41
+#define TP_RST 47          // CST816 复位脚，不复位的话读出来全是 0
+
+// 板载按键 —— 实测映射（用 hook/key-scan.py 逐个按出来的）
+//   GPIO4 = 音量+    GPIO0 = 音量-    GPIO5 = 第三个键（当静音）
+// 注意 GPIO0 是 strapping 脚：开机瞬间按住它会进下载模式，正常使用时无影响。
+#define KEY_VOL_UP   4
+#define KEY_VOL_DOWN 0
+#define KEY_MUTE     5
 
 static Arduino_DataBus* bus   = new Arduino_ESP32SPI(45, 21, 38, 39, -1);
 static Arduino_GFX*     panel = new Arduino_ST7789(bus, 40, 0, true, 240, 240);
@@ -45,6 +54,10 @@ public:
 };
 
 static PsramCanvas* gfx = new PsramCanvas(240, 240, panel);
+
+// USB 拔掉后 Serial 写会阻塞（HWCDC 的 TX 缓冲满了就卡住），
+// 主循环里的日志一律走这个宏，没连接就直接丢掉。
+#define DBG(...) do { if (Serial) Serial.printf(__VA_ARGS__); } while (0)
 
 static constexpr uint16_t C(uint8_t r, uint8_t g, uint8_t b) {
   return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
@@ -72,17 +85,48 @@ struct EventItem {
 EventItem events[MAX_EVENTS];
 int eventCount = 0;
 int cardIndex = 0;
+int listPage  = 0;          // 日程列表当前页
+#define LIST_ROWS 5
 
 enum Screen { SC_MAIN, SC_LIST, SC_POPUP };
 Screen screen = SC_MAIN;
 int popupIdx = 0;
 
-char lunarText[32] = "";
+// 声音
+int  volumePct = 60;
+bool soundOn   = true;
+int  popupBeeps = 0;          // 本次弹窗已经响过几次
+unsigned long popupSince = 0; // 弹窗出现时刻，用于兜底自动关闭
+unsigned long volToastUntil = 0;   // 音量浮层消失时刻
+#define VOL_TOAST_MS 1000
+unsigned long lastBeepMs = 0;
+#define POPUP_BEEP_GAP 30000  // 未处理时每 30 秒再响一次
+#define POPUP_BEEP_MAX 3      // 最多响 3 次
+
+// 未来 3 天的「日期/周几/农历/天气」，USB 断开后靠它撑过去
+// 缓冲区按「最长的中文文案」留足空间：天气文案最长 "晴间多云"=12 字节，
+// 农历最长 "乙巳蛇年 · 十一月廿四"=31 字节。
+#define MAX_DAYS 3
+struct DayInfo {
+  char date[8];      // 11-03
+  char week[16];     // 周二
+  char lunar[48];
+  int  temp;
+  char text[24];
+  char icon[16];
+  char aqi[24];
+};
+DayInfo days[MAX_DAYS];
+int dayCount = 0;
+char tempDate[8] = "";     // tempVal 是哪一天的实时温度
+char weekText[16] = "";    // 当前日期对应的周几（来自推送，优先于本地推算）
+
+char lunarText[48] = "";
 int  tempVal = -999;
-char weatherText[8] = "";
-char weatherIcon[8] = "";
-char aqiText[16] = "";
-char cityText[20] = "";
+char weatherText[24] = "";
+char weatherIcon[16] = "";
+char aqiText[24] = "";
+char cityText[32] = "";
 
 char ackKey[16] = "";      // 已确认的日程 "MM.DDHH:MM"
 char snoozeKey[16] = "";   // 选择"到点再叫我"的日程
@@ -116,6 +160,10 @@ void textCenter(const char* s, int yBaseline, uint16_t color) {
   gfx->print(s);
 }
 
+// 以 cx 为中心写字(按钮用)，定义在下方
+void textCenterAt(const char* s, int cx, int yBaseline, uint16_t color);
+void drawVolumeToast();          // 音量浮层，定义在渲染段之前
+
 const char* weekCN(int wday) {
   static const char* d[] = {"周日", "周一", "周二", "周三", "周四", "周五", "周六"};
   return d[wday % 7];
@@ -137,6 +185,22 @@ size_t utf8CharBytes(const char* s) {
     if (!s[i] || ((uint8_t)s[i] & 0xC0) != 0x80) return 0;
   }
   return n;
+}
+
+// 安全拷贝: 按 UTF-8 字符边界截断, 绝不把一个汉字劈成两半。
+// strlcpy 是按字节截的, 遇到中文会切出半个字符, 屏幕上就是乱码。
+void copyUtf8(char* dst, size_t cap, const char* src) {
+  if (!cap) return;
+  size_t used = 0;
+  while (*src) {
+    size_t n = utf8CharBytes(src);
+    if (!n) { src++; continue; }                 // 跳过非法字节
+    if (used + n + 1 > cap) break;                // 放不下整个字符就停
+    memcpy(dst + used, src, n);
+    used += n;
+    src += n;
+  }
+  dst[used] = 0;
 }
 
 void fitText(const char* s, char* out, size_t capacity, int maxWidth) {
@@ -209,6 +273,43 @@ void toggleClockMode() {
   }
   forceRender = true;
 }
+
+// ---------------- 音量 / 提示音 ----------------
+void saveAudioPrefs() {
+  Preferences p;
+  if (p.begin("clockui", false)) {
+    p.putInt("vol", volumePct);
+    p.putBool("snd", soundOn);
+    p.end();
+  }
+}
+
+void applyVolume(int v) {
+  volumePct = v < 0 ? 0 : (v > 100 ? 100 : v);
+  audioSetVolume(soundOn ? volumePct : 0);
+  saveAudioPrefs();
+  volToastUntil = millis() + VOL_TOAST_MS;   // 顶部浮层显示 1 秒
+  drawVolumeToast();                         // 立刻显示，不等下一帧
+  gfx->flushBand(0, 48);
+}
+
+void setSoundOn(bool on) {
+  soundOn = on;
+  audioSetVolume(soundOn ? volumePct : 0);
+  saveAudioPrefs();
+  volToastUntil = millis() + VOL_TOAST_MS;
+  drawVolumeToast();
+  gfx->flushBand(0, 48);
+}
+
+// 弹窗出现时响一次，之后每 30 秒补一次，最多 3 次
+void ringPopup() {
+  popupBeeps = 1;
+  lastBeepMs = millis();
+  if (soundOn) audioChime();
+}
+
+void stopPopupRing() { popupBeeps = 0; }
 
 // ---------------- 天气图标 ----------------
 void drawWeatherIcon(int cx, int cy, const char* icon) {
@@ -291,7 +392,9 @@ void drawClockSeconds(struct tm* t) {
 void drawClockHeader(struct tm* t) {
   char buf[40];
   gfx->setFont(u8g2_font_wqy12_t_gb2312);
-  snprintf(buf, sizeof(buf), "%02d月%02d日  %s", t->tm_mon + 1, t->tm_mday, weekCN(t->tm_wday));
+  // 周几优先用 Mac 推来的值（跟着农历一起下来的），推不到再按本地时钟算。
+  const char* wk = weekText[0] ? weekText : weekCN(t->tm_wday);
+  snprintf(buf, sizeof(buf), "%02d月%02d日  %s", t->tm_mon + 1, t->tm_mday, wk);
   drawFitText(buf, 16, 27, 150, C_TEXT);
   // 串口连通不代表在充电; 只画代码实际能够确认的数据来源。
   const char* src = linkOnline ? "USB" : (demoMode ? "DEMO" :
@@ -406,62 +509,119 @@ void textCenterAt(const char* s, int cx, int yBaseline, uint16_t color) {
 }
 
 // ---------------- 日程列表 ----------------
-void drawListCard(int y, int idx, bool first) {
+// 单行卡片：左边标题、右边时间；一页 4 条，上下滑动翻页
+void drawListRow(int y, int idx, bool first) {
   EventItem* e = &events[idx];
-  gfx->fillRoundRect(16, y, 208, 30, 6, first ? C_ACCENTL : C_CARD);
-  gfx->fillRect(16, y + 5, 2, 20, first ? C_ORANGE : C_LINE);
-  char buf[64];
+  gfx->fillRoundRect(16, y, 208, 26, 6, first ? C_ACCENTL : C_CARD);
+  gfx->fillRect(16, y + 4, 2, 18, first ? C_ORANGE : C_LINE);
+
+  // 每一行都带日期，格式 月-日（11-03），后面跟时间
+  char when[40];
+  char mmdd[8];
+  strlcpy(mmdd, e->date, sizeof(mmdd));        // 内部存的是 "11.03"
+  if (strlen(mmdd) == 5 && mmdd[2] == '.') mmdd[2] = '-';
+  snprintf(when, sizeof(when), "%s %s", mmdd, e->time);
+
   gfx->setFont(u8g2_font_wqy12_t_gb2312);
-  drawFitText(e->title, 26, y + 12, 188, C_TEXT);
-  snprintf(buf, sizeof(buf), "%s%s%s", e->time, e->src[0] ? " · " : "", e->src);
-  drawFitText(buf, 26, y + 26, 188, C_MUTED);
+  int whenW = textWidth(when);
+  int titleMax = 216 - 26 - whenW - 8;
+  if (titleMax < 56) titleMax = 56;
+  drawFitText(e->title, 26, y + 17, titleMax, C_TEXT);
+  textRight(when, 216, y + 17, C_MUTED);
 }
 
 void drawList(struct tm* t) {
   gfx->fillScreen(C_BG);
-  char today[6], tomorrow[6];
-  snprintf(today, sizeof(today), "%02d.%02d", t->tm_mon + 1, t->tm_mday);
-  time_t tt = nowEpoch() + 86400;
-  struct tm nxt; localtime_r(&tt, &nxt);
-  snprintf(tomorrow, sizeof(tomorrow), "%02d.%02d", nxt.tm_mon + 1, nxt.tm_mday);
+
+  // 按 日期+时间 排序的索引（插入排序，最多 8 条）
+  int order[MAX_EVENTS];
+  int n = 0;
+  for (int i = 0; i < eventCount; i++) order[n++] = i;
+  for (int i = 1; i < n; i++) {
+    int k = order[i], j = i - 1;
+    while (j >= 0) {
+      EventItem& a = events[order[j]];
+      EventItem& b = events[k];
+      bool later = (strcmp(a.date, b.date) > 0) ||
+                   (strcmp(a.date, b.date) == 0 && strcmp(a.time, b.time) > 0);
+      if (!later) break;
+      order[j + 1] = order[j];
+      j--;
+    }
+    order[j + 1] = k;
+  }
+
+  int pages = n ? (n + LIST_ROWS - 1) / LIST_ROWS : 1;
+  if (listPage < 0) listPage = 0;
+  if (listPage > pages - 1) listPage = pages - 1;
 
   gfx->setFont(u8g2_font_wqy16_t_gb2312);
-  drawFitText("日程", 16, 27, 100, C_TEXT);
+  drawFitText("日程", 16, 27, 80, C_TEXT);
   gfx->setFont(u8g2_font_wqy12_t_gb2312);
-  textRight("今天 / 明天", 224, 26, C_MUTED);
+  char buf[32];
+  if (n) snprintf(buf, sizeof(buf), "%d/%d 页 · %d 条", listPage + 1, pages, n);
+  else   strlcpy(buf, "共 0 条", sizeof(buf));
+  textRight(buf, 224, 26, C_MUTED);
   gfx->drawFastHLine(16, 37, 208, C_LINE);
-  drawFitText("今天", 16, 54, 100, C_ACCENT);
 
-  int y = 61, shownToday = 0, drawn = 0;
-  for (int i = 0; i < eventCount && drawn < 2; i++) {
-    if (!strcmp(events[i].date, today)) {
-      drawListCard(y, i, shownToday == 0);
-      y += 34; shownToday++; drawn++;
+  if (n == 0) {
+    drawFitText("今天和明天都没有日程", 16, 104, 208, C_MUTED);
+  } else {
+    int start = listPage * LIST_ROWS;
+    for (int r = 0; r < LIST_ROWS && start + r < n; r++) {
+      int idx = order[start + r];
+      drawListRow(56 + r * 28, idx, listPage == 0 && r == 0);
     }
-  }
-  if (shownToday == 0) {
-    gfx->setFont(u8g2_font_wqy12_t_gb2312);
-    drawFitText("今天没有日程", 26, 81, 188, C_MUTED);
   }
 
   gfx->setFont(u8g2_font_wqy12_t_gb2312);
-  drawFitText("明天", 16, 144, 100, C_ACCENT);
-  y = 151;
+  textCenter(pages > 1 ? "上下滑动翻页 · 点按返回" : "点按返回", 234, C_MUTED);
+}
 
-  int shownTomorrow = 0, drawn2 = 0;
-  for (int i = 0; i < eventCount && drawn2 < 2; i++) {
-    if (!strcmp(events[i].date, tomorrow)) {
-      drawListCard(y, i, false);
-      y += 34; shownTomorrow++; drawn2++;
-    }
-  }
-  if (shownTomorrow == 0) {
-    gfx->setFont(u8g2_font_wqy12_t_gb2312);
-    drawFitText("明天没有日程", 26, 172, 188, C_MUTED);
-  }
+// ---------------- 音量浮层 ----------------
+// 顶部深色胶囊 + 进度条，1 秒后自动消失；不切屏、不挡主要内容
+void drawVolumeToast() {
+  const int w = 132, h = 40, x = (240 - w) / 2, y = 6;
+  gfx->fillRoundRect(x, y, w, h, 12, C_TEXT);
 
+  char buf[16];
   gfx->setFont(u8g2_font_wqy12_t_gb2312);
-  textCenter("点按返回", 233, C_MUTED);
+  if (!soundOn)                strlcpy(buf, "已静音", sizeof(buf));
+  else if (volumePct == 0)     strlcpy(buf, "音量 0%", sizeof(buf));
+  else                         snprintf(buf, sizeof(buf), "音量 %d%%", volumePct);
+  textCenterAt(buf, 120, y + 20, C_BG);
+
+  int barX = x + 14, barW = w - 28;
+  gfx->fillRoundRect(barX, y + 27, barW, 4, 2, C_MUTED);
+  int fill = soundOn ? barW * volumePct / 100 : 0;
+  if (fill > 0) gfx->fillRoundRect(barX, y + 27, fill < 4 ? 4 : fill, 4, 2, C_BG);
+}
+
+// 按当前日期挑出对应的那一天，把农历/天气填进全局变量
+void applyDayFor(struct tm* t) {
+  char key[8];
+  snprintf(key, sizeof(key), "%02d-%02d", t->tm_mon + 1, t->tm_mday);
+  for (int i = 0; i < dayCount; i++) {
+    if (strcmp(days[i].date, key)) continue;
+    // tempDate 是「实时天气所属的那一天」。当天沿用实时温度/文案，
+    // 之后的几天用预报的最高温和天气文案。
+    bool liveDay = (strcmp(days[i].date, tempDate) == 0);
+    if (days[i].lunar[0]) copyUtf8(lunarText, sizeof(lunarText), days[i].lunar);
+    if (!liveDay) {
+      tempVal = days[i].temp;
+      if (days[i].text[0]) copyUtf8(weatherText, sizeof(weatherText), days[i].text);
+      if (days[i].icon[0]) copyUtf8(weatherIcon, sizeof(weatherIcon), days[i].icon);
+    }
+    if (days[i].aqi[0])  copyUtf8(aqiText, sizeof(aqiText), days[i].aqi);
+    if (days[i].week[0]) copyUtf8(weekText, sizeof(weekText), days[i].week);
+    return;
+  }
+  // 三天缓存里没有这一天（离线超过 3 天）：周几退回本地推算，农历清空，
+  // 都别显示过期的 —— 农历和日期是绑死的，留着就是错的。
+  // 注意：dayCount == 0 表示压根没有三天缓存（只推了 LUNAR|），
+  // 那种情况下 lunarText 是实时推来的，不能清。
+  weekText[0] = 0;
+  if (dayCount > 0) lunarText[0] = 0;
 }
 
 // ---------------- 渲染 ----------------
@@ -469,6 +629,17 @@ void render(bool full = true) {
   time_t t = nowEpoch();
   struct tm tm;
   localtime_r(&t, &tm);
+
+  // 过 0 点：换到下一份日程/农历/天气，并整屏重绘一次。
+  // 用完整的 年月日 做键，只比 tm_mday 稳妥（跨月时不会漏判）。
+  static int renderedDate = 0;
+  int dateKey = (tm.tm_year + 1900) * 10000 + (tm.tm_mon + 1) * 100 + tm.tm_mday;
+  if (dateKey != renderedDate) {
+    renderedDate = dateKey;
+    applyDayFor(&tm);
+    full = true;
+  }
+
   bool timeChanged = tm.tm_min != renderedMinute || tm.tm_hour != renderedHour;
   if (full || lastSec < 0 || (screen != SC_MAIN && timeChanged)) {
     if (screen == SC_MAIN)      drawMain(&tm);
@@ -484,6 +655,13 @@ void render(bool full = true) {
     if (timeChanged) gfx->flushBand(41, minimalMode ? 143 : 108);
     else gfx->flushBand(minimalMode ? 150 : 130, minimalMode ? 34 : 18);
   }
+
+  // 音量浮层画在所有界面之上，只推顶部这一条
+  if (volToastUntil && millis() < volToastUntil) {
+    drawVolumeToast();
+    gfx->flushBand(0, 48);
+  }
+
   lastSec = tm.tm_sec;
   renderedMinute = tm.tm_min;
   renderedHour = tm.tm_hour;
@@ -501,7 +679,7 @@ void setEvent(int i, time_t when, const char* title, const char* src, bool allDa
   dateFromTm(&e, events[i].date, sizeof(events[i].date));
   if (allDay) strlcpy(events[i].time, "全天", sizeof(events[i].time));
   else snprintf(events[i].time, sizeof(events[i].time), "%02d:%02d", e.tm_hour, e.tm_min);
-  strlcpy(events[i].title, title, sizeof(events[i].title));
+  copyUtf8(events[i].title, sizeof(events[i].title), title);
   strlcpy(events[i].src, src, sizeof(events[i].src));
   events[i].allDay = allDay;
   events[i].minutesUntil = allDay ? 99999 : (int)((when - nowEpoch()) / 60);
@@ -509,7 +687,7 @@ void setEvent(int i, time_t when, const char* title, const char* src, bool allDa
 
 void initDemoEvents() {
   time_t nowT = nowEpoch();
-  setEvent(0, nowT + 10 * 60, "备赛课二期提测", "钉钉", false);
+  setEvent(0, nowT + 25 * 60, "备赛课二期提测", "钉钉", false);
   setEvent(1, nowT + 70 * 60, "new-api 每日签到", "本地", false);
   time_t t1 = nowT + 86400;
   struct tm a; localtime_r(&t1, &a);
@@ -550,7 +728,7 @@ void syncEvents() {
   if (code == 200) {
     JsonDocument doc;
     if (deserializeJson(doc, http.getString()) == DeserializationError::Ok) {
-      strlcpy(lunarText, doc["lunar"] | "", sizeof(lunarText));
+      copyUtf8(lunarText, sizeof(lunarText), doc["lunar"] | "");
       JsonArray arr = doc["events"];
       int n = 0;
       for (JsonObject o : arr) {
@@ -567,7 +745,7 @@ void syncEvents() {
           memcpy(events[n].time, start + 11, 5);
           events[n].time[5] = 0;
         }
-        strlcpy(events[n].title, o["title"] | "(无标题)", sizeof(events[n].title));
+        copyUtf8(events[n].title, sizeof(events[n].title), o["title"] | "(无标题)");
         strlcpy(events[n].src, "钉钉", sizeof(events[n].src));
         events[n].allDay = allDay;
         events[n].minutesUntil = parseIsoToMinutes(start, allDay, nullptr);
@@ -590,16 +768,43 @@ void syncEvents() {
       JsonObject w = doc["weather"];
       if (!w.isNull()) {
         tempVal = w["temp"] | -999;
-        strlcpy(weatherText, w["text"] | "", sizeof(weatherText));
-        strlcpy(weatherIcon, w["icon"] | "clear", sizeof(weatherIcon));
-        strlcpy(cityText, w["city"] | "", sizeof(cityText));
-        strlcpy(aqiText, w["aqi_text"] | "", sizeof(aqiText));
+        copyUtf8(weatherText, sizeof(weatherText), w["text"] | "");
+        copyUtf8(weatherIcon, sizeof(weatherIcon), w["icon"] | "clear");
+        copyUtf8(cityText, sizeof(cityText), w["city"] | "");
+        copyUtf8(aqiText, sizeof(aqiText), w["aqi_text"] | "");
       }
-      if (lunarText[0] == 0) strlcpy(lunarText, doc["lunar"] | "", sizeof(lunarText));
+      if (lunarText[0] == 0) copyUtf8(lunarText, sizeof(lunarText), doc["lunar"] | "");
       forceRender = true;
     }
   }
   http.end();
+}
+
+
+// ---------------- 按键扫描（诊断用） ----------------
+// 串口发 KEYSCAN，30 秒内把 GPIO0/4/5 的电平变化打出来。
+// 期间屏幕不刷新，属于一次性排查工具。
+void keyScan(int seconds) {
+  const uint8_t pins[] = {0, 4, 5};
+  int last[3];
+  for (int i = 0; i < 3; i++) {
+    pinMode(pins[i], INPUT_PULLUP);
+    last[i] = digitalRead(pins[i]);
+  }
+  Serial.printf("[scan] 初始  GPIO0=%d GPIO4=%d GPIO5=%d  (1=松开 0=按下)\n",
+                last[0], last[1], last[2]);
+  unsigned long end = millis() + (unsigned long)seconds * 1000UL;
+  while (millis() < end) {
+    for (int i = 0; i < 3; i++) {
+      int v = digitalRead(pins[i]);
+      if (v != last[i]) {
+        Serial.printf("[scan] GPIO%d -> %s\n", pins[i], v == LOW ? "LOW 按下" : "HIGH 松开");
+        last[i] = v;
+      }
+    }
+    delay(12);
+  }
+  Serial.println("[scan] 结束");
 }
 
 // ---------------- USB 串口通道 ----------------
@@ -610,6 +815,9 @@ void syncEvents() {
 //   PING                       -> PONG
 static char s_buf[192];
 static uint8_t s_len = 0;
+static int dayExpected = -1;     // DAYS|n 里声明的条数
+static int evExpected = -1;      // EVENTS|n 里声明的条数
+static int evGot = 0;
 
 void linkTouch() { linkOnline = true; lastLinkMs = millis(); }
 
@@ -641,6 +849,192 @@ void handleLine(char* s) {
     return;
   }
 
+  // 批量日程：EVENTS|<n> 然后 n 行 EV|MM.DD|HH:MM|分钟|allDay|标题
+  if (!strncmp(s, "EVENTS|", 7)) {
+    int n = atoi(s + 7);
+    if (n < 0) n = 0;
+    if (n > MAX_EVENTS) n = MAX_EVENTS;
+    eventCount = 0;
+    evExpected = n;
+    evGot = 0;
+    demoMode = false;
+    if (n == 0) { evExpected = -1; forceRender = true; }
+    linkTouch();
+    Serial.println("OK");
+    return;
+  }
+
+  if (!strncmp(s, "EV|", 3)) {
+    char* p = s + 3;
+    char* f[5];
+    int nf = 0;
+    f[nf++] = p;
+    while (*p && nf < 5) {
+      if (*p == '|') { *p = 0; f[nf++] = p + 1; }
+      p++;
+    }
+    if (nf < 5) { Serial.println("ERR"); return; }
+    if (eventCount < MAX_EVENTS) {
+      EventItem& e = events[eventCount];
+      memset(&e, 0, sizeof(e));
+      strlcpy(e.date, f[0], sizeof(e.date));
+      strlcpy(e.time, f[1], sizeof(e.time));
+      e.minutesUntil = atoi(f[2]);
+      e.allDay = atoi(f[3]) != 0;
+      copyUtf8(e.title, sizeof(e.title), f[4]);
+      strlcpy(e.src, "USB", sizeof(e.src));
+      eventCount++;
+    }
+    evGot++;
+    if (evExpected >= 0 && evGot >= evExpected) {
+      evExpected = -1;
+      forceRender = true;
+    }
+    linkTouch();
+    Serial.println("OK");
+    return;
+  }
+
+  // 三天数据：DAYS|n 然后 n 行 DAY|日期|周几|农历|温度|文案|图标|空气质量
+  if (!strncmp(s, "DAYS|", 5)) {
+    int n = atoi(s + 5);
+    if (n < 0) n = 0;
+    if (n > MAX_DAYS) n = MAX_DAYS;
+    dayCount = 0;
+    dayExpected = n;
+    if (n == 0) dayExpected = -1;
+    linkTouch();
+    Serial.println("OK");
+    return;
+  }
+
+  if (!strncmp(s, "DAY|", 4)) {
+    char* p = s + 4;
+    char* f[7];
+    int nf = 0;
+    f[nf++] = p;
+    while (*p && nf < 7) {
+      if (*p == '|') { *p = 0; f[nf++] = p + 1; }
+      p++;
+    }
+    if (nf >= 7 && dayCount < MAX_DAYS) {
+      DayInfo& d = days[dayCount];
+      memset(&d, 0, sizeof(d));
+      copyUtf8(d.date,  sizeof(d.date),  f[0]);
+      copyUtf8(d.week,  sizeof(d.week),  f[1]);
+      copyUtf8(d.lunar, sizeof(d.lunar), f[2]);
+      d.temp = atoi(f[3]);
+      copyUtf8(d.text,  sizeof(d.text),  f[4]);
+      copyUtf8(d.icon,  sizeof(d.icon),  f[5]);
+      copyUtf8(d.aqi,   sizeof(d.aqi),   f[6]);
+      dayCount++;
+    }
+    if (dayExpected >= 0 && dayCount >= dayExpected) {
+      dayExpected = -1;
+      struct tm nowTm;
+      time_t tt = nowEpoch();
+      localtime_r(&tt, &nowTm);
+      applyDayFor(&nowTm);
+      forceRender = true;
+    }
+    linkTouch();
+    Serial.println("OK");
+    return;
+  }
+
+  // 天气：WEATHER|温度|文案|图标|城市|空气质量
+  if (!strncmp(s, "WEATHER|", 8)) {
+    char* p = s + 8;
+    char* f[5];
+    int nf = 0;
+    f[nf++] = p;
+    while (*p && nf < 5) {
+      if (*p == '|') { *p = 0; f[nf++] = p + 1; }
+      p++;
+    }
+    if (nf >= 5) {
+      tempVal = atoi(f[0]);
+      struct tm wt; time_t wtt = nowEpoch(); localtime_r(&wtt, &wt);
+      snprintf(tempDate, sizeof(tempDate), "%02d-%02d", wt.tm_mon + 1, wt.tm_mday);
+      copyUtf8(weatherText, sizeof(weatherText), f[1]);
+      copyUtf8(weatherIcon, sizeof(weatherIcon), f[2]);
+      copyUtf8(cityText,    sizeof(cityText),    f[3]);
+      copyUtf8(aqiText,     sizeof(aqiText),     f[4]);
+      forceRender = true;
+    }
+    linkTouch();
+    Serial.println("OK");
+    return;
+  }
+
+  // 农历：LUNAR|丙午马年 · 九月廿五
+  if (!strncmp(s, "LUNAR|", 6)) {
+    copyUtf8(lunarText, sizeof(lunarText), s + 6);
+    forceRender = true;
+    linkTouch();
+    Serial.println("OK");
+    return;
+  }
+
+  // 调试用：把设备当前缓存的三天数据/天气/农历原样读回去。
+  // 用来验证 Mac 推过来的中文有没有被截断或劈坏（Mac 端对比字节数即可）。
+  if (!strcmp(s, "STATE")) {
+    Serial.printf("STATE|days|%d\n", dayCount);
+    for (int i = 0; i < dayCount; i++) {
+      Serial.printf("STATE|day|%d|%s|%s|%s|%d|%s|%s|%s\n", i,
+                    days[i].date, days[i].week, days[i].lunar, days[i].temp,
+                    days[i].text, days[i].icon, days[i].aqi);
+    }
+    Serial.printf("STATE|now|%s|%s|%s|%s|%s|%d|%s|%s\n",
+                  lunarText, weatherText, weatherIcon, cityText, aqiText,
+                  tempVal, weekText, tempDate);
+    Serial.printf("STATE|events|%d\n", eventCount);
+    for (int i = 0; i < eventCount && i < MAX_EVENTS; i++) {
+      Serial.printf("STATE|ev|%d|%s|%s|%s|%d\n", i, events[i].date,
+                    events[i].time, events[i].title, events[i].minutesUntil);
+    }
+    // 本地时钟算出来的日期和周几 —— 用来核对「三天缓存之外」的兜底逻辑。
+    {
+      time_t t = nowEpoch();
+      struct tm lt; localtime_r(&t, &lt);
+      char dk[16];
+      snprintf(dk, sizeof(dk), "%04d-%02d-%02d", lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday);
+      Serial.printf("STATE|local|%s|%s\n", dk, weekCN(lt.tm_wday));
+    }
+    Serial.println("STATE|ok");
+    return;
+  }
+
+  // 音量 / 提示音，可从 Mac 端调：VOL|60  SND|1  BEEP
+  if (!strncmp(s, "VOL|", 4)) {
+    applyVolume(atoi(s + 4));
+    Serial.printf("OK %d\n", volumePct);
+    linkTouch();
+    return;
+  }
+
+  if (!strncmp(s, "SND|", 4)) {
+    setSoundOn(atoi(s + 4) != 0);
+    Serial.printf("OK %d\n", soundOn ? 1 : 0);
+    linkTouch();
+    return;
+  }
+
+  if (!strncmp(s, "KEYSCAN", 7)) {
+    int sec = atoi(s + 7);
+    if (sec <= 0 || sec > 120) sec = 30;
+    Serial.printf("OK %d\n", sec);
+    keyScan(sec);
+    return;
+  }
+
+  if (!strcmp(s, "BEEP")) {
+    if (soundOn) audioChime();
+    Serial.println("OK");
+    linkTouch();
+    return;
+  }
+
   if (!strncmp(s, "NEXT|", 5)) {
     char* p = s + 5;
     char* bar1 = strchr(p, '|');
@@ -653,9 +1047,9 @@ void handleLine(char* s) {
     memset(&events[0], 0, sizeof(EventItem));
     struct tm nowTm; time_t tt = nowEpoch(); localtime_r(&tt, &nowTm);
     dateFromTm(&nowTm, events[0].date, sizeof(events[0].date));
-    strlcpy(events[0].time, p, sizeof(events[0].time));
+    copyUtf8(events[0].time, sizeof(events[0].time), p);
     events[0].minutesUntil = atoi(bar1 + 1);
-    strlcpy(events[0].title, bar2 + 1, sizeof(events[0].title));
+    copyUtf8(events[0].title, sizeof(events[0].title), bar2 + 1);
     strlcpy(events[0].src, "USB", sizeof(events[0].src));
     demoMode = false;
     forceRender = true;
@@ -702,41 +1096,54 @@ int findPopupIdx() {
 }
 
 // ---------------- 触摸 ----------------
+uint32_t touchErr = 0;       // I2C 失败次数，用于区分「总线挂了」和「没触摸」
+
 bool readTouch(int16_t& x, int16_t& y) {
+  // CST816 寄存器：0x01 手势 / 0x02 手指数 / 0x03-04 X / 0x05-06 Y
   Wire.beginTransmission(0x15);
-  Wire.write(0x02);
-  if (Wire.endTransmission() != 0) return false;
-  if (Wire.requestFrom(0x15, 5) != 5) return false;
-  uint8_t fingers = Wire.read();
-  uint8_t xh = Wire.read(), xl = Wire.read(), yh = Wire.read(), yl = Wire.read();
-  x = ((xh & 0x0F) << 8) | xl;
-  y = ((yh & 0x0F) << 8) | yl;
-  return fingers > 0;
+  Wire.write((uint8_t)0x01);
+  if (Wire.endTransmission(false) != 0) { touchErr++; return false; }
+  if (Wire.requestFrom((uint8_t)0x15, (uint8_t)6) != 6) { touchErr++; return false; }
+
+  uint8_t d[6];
+  for (int i = 0; i < 6; i++) d[i] = Wire.read();
+  if ((d[1] & 0x0F) == 0) return false;      // 没有手指
+
+  x = ((d[2] & 0x0F) << 8) | d[3];
+  y = ((d[4] & 0x0F) << 8) | d[5];
+  return true;
 }
 
 void handleGesture(int16_t dx, int16_t dy, int16_t endX, int16_t endY, unsigned long heldMs) {
   if (screen == SC_POPUP) {
-    bool leftButton = endX >= 16 && endX < 112;
-    bool rightButton = endX >= 124 && endX < 224;
-    if (abs(dx) < 20 && abs(dy) < 20 && endY >= 188 && endY < 228 &&
-        (leftButton || rightButton)) {
+    // 只要点一下就能关：只有右下角「到点再叫我」才延后，其余位置一律当「知道了」。
+    // 这样即使按钮坐标判断有偏差，也不会再出现「卡在提醒页出不来」。
+    if (abs(dx) < 30 && abs(dy) < 30) {
+      bool snooze = endX >= 120 && endY >= 180;
       char key[16];
       eventKey(popupIdx, key, sizeof(key));
-      if (leftButton) {
-        strlcpy(ackKey, key, sizeof(ackKey));   // 知道了
-        snoozeKey[0] = 0;
-      } else {
+      if (snooze) {
         strlcpy(snoozeKey, key, sizeof(snoozeKey));  // 到点再叫我
         snoozeDone = false;
+      } else {
+        strlcpy(ackKey, key, sizeof(ackKey));        // 知道了
+        snoozeKey[0] = 0;
       }
       screen = SC_MAIN;
+      stopPopupRing();
       forceRender = true;
     }
     return;
   }
   if (screen == SC_LIST) {
-    screen = SC_MAIN;
-    forceRender = true;
+    if (abs(dy) > 30 && abs(dy) > abs(dx)) {
+      if (dy < 0) listPage++;          // 上滑下一页
+      else if (listPage > 0) listPage--;
+      forceRender = true;
+    } else {
+      screen = SC_MAIN;
+      forceRender = true;
+    }
     return;
   }
   // 主屏
@@ -744,9 +1151,10 @@ void handleGesture(int16_t dx, int16_t dy, int16_t endX, int16_t endY, unsigned 
     if (dx < 0 && cardIndex + 1 < eventCount) cardIndex++;
     if (dx > 0 && cardIndex > 0) cardIndex--;
     forceRender = true;
-  } else if (abs(dx) < 20 && abs(dy) < 20) {
+  } else if (abs(dx) < 30 && abs(dy) < 30) {
     if (heldMs >= 650) toggleClockMode();
     else {
+      listPage = 0;
       screen = SC_LIST;
       forceRender = true;
     }
@@ -767,7 +1175,13 @@ bool loadWifiFromNVS(String& ssid, String& pass) {
 }
 
 void setup() {
+  // USB CDC 的收发队列默认各 256 字节。Mac 一次推送（三天数据 + 天气 + 日程）
+  // 大概 400~500 字节，256 装不下会被静默丢弃 —— 表现为「某几条 DAY 没进去」。
+  // 必须在 begin() 之前调，begin() 只在队列为空时才用默认值创建。
+  Serial.setRxBufferSize(1024);
+  Serial.setTxBufferSize(1024);
   Serial.begin(115200);
+  Serial.setTxTimeoutMs(0);        // 写不出去立刻返回，绝不阻塞主循环
   delay(200);
   pinMode(BAT_EN, OUTPUT); digitalWrite(BAT_EN, HIGH);
   if (!gfx->begin()) Serial.println("[gfx] begin failed");
@@ -777,9 +1191,22 @@ void setup() {
   Preferences ui;
   if (ui.begin("clockui", true)) {
     minimalMode = ui.getBool("minimal", false);
+    volumePct   = ui.getInt("vol", 60);
+    soundOn     = ui.getBool("snd", true);
     ui.end();
   }
-  Wire.begin(TP_SDA, TP_SCL);
+  Wire.begin(TP_SDA, TP_SCL);       // 触摸 / ES8311 / IMU 共用这条 I2C
+  // CST816 必须硬复位一次才会正常应答；缺了这步读出来永远是「没有手指」
+  pinMode(TP_RST, OUTPUT);
+  digitalWrite(TP_RST, LOW);
+  delay(10);
+  digitalWrite(TP_RST, HIGH);
+  delay(60);
+  pinMode(KEY_VOL_UP, INPUT_PULLUP);
+  pinMode(KEY_VOL_DOWN, INPUT_PULLUP);
+  pinMode(KEY_MUTE, INPUT_PULLUP);
+  audioBegin();                     // 失败也不影响时钟
+  audioSetVolume(soundOn ? volumePct : 0);
   setenv("TZ", "CST-8", 1);
   tzset();
 
@@ -847,15 +1274,48 @@ void loop() {
     bool full = forceRender;
     forceRender = false;
     // 包括极简模式在内, 提醒检查仍然每秒运行。
+    bool ringNow = false;
     if (screen == SC_MAIN) {
       int idx = findPopupIdx();
       if (idx >= 0) {
         popupIdx = idx;
+        // 「到点再叫我」只补提醒一次: 弹过就置位, 否则关掉后下一秒又弹(还会再响)
+        char k[16];
+        eventKey(idx, k, sizeof(k));
+        if (snoozeKey[0] && !strcmp(k, snoozeKey)) snoozeDone = true;
         screen = SC_POPUP;
+        popupSince = millis();
         full = true;
+        ringNow = true;
       }
     }
-    render(full);
+    render(full);                    // 先画，再响：声音是阻塞的，别卡住首帧
+    if (ringNow) ringPopup();
+  }
+
+  // 音量浮层到期：整屏重绘一次把它擦掉
+  if (volToastUntil && millis() >= volToastUntil) {
+    volToastUntil = 0;
+    forceRender = true;
+  }
+
+  // 兜底：提醒页最多停留 3 分钟。触摸或按键万一都失灵，也不会把时钟永久锁死。
+  if (screen == SC_POPUP && popupSince && millis() - popupSince > 180000UL) {
+    char k[16];
+    eventKey(popupIdx, k, sizeof(k));
+    strlcpy(ackKey, k, sizeof(ackKey));
+    snoozeKey[0] = 0;
+    screen = SC_MAIN;
+    stopPopupRing();
+    forceRender = true;
+  }
+
+  // 弹窗没处理就每 30 秒再响一次，最多 3 次
+  if (screen == SC_POPUP && soundOn && popupBeeps < POPUP_BEEP_MAX &&
+      millis() - lastBeepMs > POPUP_BEEP_GAP) {
+    lastBeepMs = millis();
+    popupBeeps++;
+    audioChime();
   }
 
   if (WiFi.status() == WL_CONNECTED && millis() - lastSyncMs > 60000) {
@@ -868,21 +1328,70 @@ void loop() {
   static int16_t startX = 0, startY = 0, lastX = 0, lastY = 0;
   static unsigned long lastTouchCheck = 0;
   static unsigned long touchStartMs = 0;
+  static unsigned long lastTouchErrPrint = 0;
   if (millis() - lastTouchCheck > 60) {
     lastTouchCheck = millis();
+    if (touchErr && millis() - lastTouchErrPrint > 5000) {
+      lastTouchErrPrint = millis();
+      DBG("[touch] I2C 失败 %lu 次\n", (unsigned long)touchErr);
+      touchErr = 0;
+    }
     int16_t x, y;
     bool touching = readTouch(x, y);
     if (touching && !wasTouch) {
       startX = lastX = x; startY = lastY = y;
       touchStartMs = millis();
-      Serial.printf("[touch] down %d,%d\n", x, y);
+      DBG("[touch] down %d,%d\n", x, y);
     } else if (touching) {
       lastX = x; lastY = y;
     } else if (!touching && wasTouch) {
-      Serial.printf("[touch] up %d,%d\n", lastX, lastY);
-      handleGesture(lastX - startX, lastY - startY, lastX, lastY, millis() - touchStartMs);
+      // 命中判定用「按下点」：抬指那一帧的坐标可能是 0,0 或抖动值，
+      // 用它做命中会导致「点了没反应」。
+      DBG("[touch] up %d,%d (down %d,%d)\n", lastX, lastY, startX, startY);
+      handleGesture(lastX - startX, lastY - startY, startX, startY, millis() - touchStartMs);
     }
     wasTouch = touching;
   }
+
+  // 板载按键：GPIO4 音量+ / GPIO0 音量- / GPIO5 静音
+  static bool kUp = false, kDown = false, kMute = false;
+  static unsigned long lastKeyCheck = 0;
+  if (millis() - lastKeyCheck > 40) {
+    lastKeyCheck = millis();
+    bool up   = digitalRead(KEY_VOL_UP)   == LOW;
+    bool down = digitalRead(KEY_VOL_DOWN) == LOW;
+    bool mute = digitalRead(KEY_MUTE)     == LOW;
+    bool pressed = (up && !kUp) || (down && !kDown) || (mute && !kMute);
+
+    if (pressed && screen == SC_POPUP) {
+      char key[16];
+      eventKey(popupIdx, key, sizeof(key));
+      strlcpy(ackKey, key, sizeof(ackKey));
+      snoozeKey[0] = 0;
+      screen = SC_MAIN;
+      stopPopupRing();
+      forceRender = true;
+    } else {
+      if (up && !kUp) {
+        DBG("[key] GPIO%d 音量+ -> ", KEY_VOL_UP);
+        applyVolume(volumePct + 5);
+        DBG("%d%%\n", volumePct);
+        if (soundOn) audioTick();
+      }
+      if (down && !kDown) {
+        DBG("[key] GPIO%d 音量- -> ", KEY_VOL_DOWN);
+        applyVolume(volumePct - 5);
+        DBG("%d%%\n", volumePct);
+        if (soundOn) audioTick();
+      }
+      if (mute && !kMute) {
+        DBG("[key] GPIO%d 静音切换\n", KEY_MUTE);
+        setSoundOn(!soundOn);
+        if (soundOn) audioTick();
+      }
+    }
+    kUp = up; kDown = down; kMute = mute;
+  }
+
   delay(15);
 }

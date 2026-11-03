@@ -91,14 +91,33 @@ class CalDAVClient:
             items = cal.date_search(start=time_min, end=time_max, expand=True)
         except Exception:
             items = cal.date_search(start=time_min, end=time_max, expand=False)
-        events = [self._simplify(item) for item in items]
+        # 单个对象解析失败不能拖垮整次同步：跳过并计数
+        events, skipped = [], 0
+        for item in items:
+            try:
+                e = self._simplify(item)
+            except Exception:
+                e = None
+            if e:
+                events.append(e)
+            else:
+                skipped += 1
+        if skipped:
+            log.warning("跳过 %d 个无法解析的日历对象（共 %d 个）", skipped, len(items))
         events.sort(key=lambda e: e["start"] or "")
         return events
 
     @staticmethod
     def _simplify(item):
-        vevent = item.vobject_instance.vevent
-        dtstart = vevent.dtstart.value
+        # vobject 缺失 / 对象不是 VEVENT（如 VTODO）时返回 None，由调用方跳过
+        inst = getattr(item, "vobject_instance", None)
+        vevent = getattr(inst, "vevent", None) if inst is not None else None
+        if vevent is None:
+            return None
+        dtstart = getattr(vevent, "dtstart", None)
+        if dtstart is None:
+            return None
+        dtstart = dtstart.value
         dtend = vevent.dtend.value if hasattr(vevent, "dtend") else dtstart
         is_all_day = not isinstance(dtstart, datetime)
 
@@ -264,6 +283,8 @@ class WeatherService:
                 params={"latitude": self.cfg["weather_lat"],
                         "longitude": self.cfg["weather_lon"],
                         "current": "temperature_2m,relative_humidity_2m,weather_code",
+                        "daily": "temperature_2m_max,weather_code",
+                        "forecast_days": 3,
                         "timezone": "Asia/Shanghai"}, timeout=15)
             resp.raise_for_status()
             cur = resp.json()["current"]
@@ -275,9 +296,10 @@ class WeatherService:
                 "humidity": cur.get("relative_humidity_2m"),
                 "aqi_text": self._fetch_aqi(),
             }
+            forecast = self._build_forecast(resp.json().get("daily") or {})
             with self._lock:
-                self._state.update({"weather": weather, "updated_at": iso(now()),
-                                    "error": None})
+                self._state.update({"weather": weather, "forecast": forecast,
+                                    "updated_at": iso(now()), "error": None})
             with open(WEATHER_CACHE, "w", encoding="utf-8") as f:
                 json.dump(self._state, f, ensure_ascii=False)
             print("[%s] 天气同步成功: %s %s°" % (iso(now()), text, weather["temp"]))
@@ -287,6 +309,31 @@ class WeatherService:
                 self._state["error"] = str(exc)
             print("[%s] 天气同步失败: %s" % (iso(now()), exc))
             return False
+
+    @staticmethod
+    def _build_forecast(daily):
+        """未来 3 天：日期 / 周几 / 农历 / 最高温 / 天气，给设备离线时用"""
+        dates = daily.get("time") or []
+        tmax = daily.get("temperature_2m_max") or []
+        codes = daily.get("weather_code") or []
+        week_cn = "一二三四五六日"
+        out = []
+        for i, d in enumerate(dates[:3]):
+            try:
+                day = datetime.strptime(d, "%Y-%m-%d")
+            except ValueError:
+                continue
+            text, icon = WEATHER_CODES.get(codes[i] if i < len(codes) else None,
+                                           ("未知", "cloud"))
+            out.append({
+                "date": d[5:],                                  # 11-03
+                "week": "周" + week_cn[day.weekday()],
+                "lunar": lunar_display(day) or "",
+                "temp": round(tmax[i]) if i < len(tmax) and tmax[i] is not None else -999,
+                "text": text,
+                "icon": icon,
+            })
+        return out
 
     def _fetch_aqi(self):
         """AQI 独立获取, 失败不影响主天气数据"""
@@ -408,6 +455,7 @@ def api_weather():
     state = weather_service.snapshot() if weather_service else {}
     return jsonify({
         "weather": state.get("weather"),
+        "forecast": state.get("forecast") or [],
         "lunar": lunar_display(),
         "updated_at": state.get("updated_at"),
         "stale": state.get("error") is not None,

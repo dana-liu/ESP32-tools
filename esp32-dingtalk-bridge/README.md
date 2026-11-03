@@ -28,7 +28,7 @@ cd esp32-dingtalk-bridge
 |---|---|
 | `GET /api/events` | 今天起 N 天日程列表 + 当日农历 `lunar` |
 | `GET /api/next` | 下一条日程，含 `minutes_until` 倒计时分钟数 |
-| `GET /api/weather` | 实时天气（温度/文案/icon/湿度/空气质量）+ 农历 |
+| `GET /api/weather` | 实时天气（温度/文案/icon/湿度/空气质量）+ 农历 + **未来三天预报** |
 | `GET /api/sync` | 手动触发一次日程同步 |
 | `GET /api/health` | 缓存状态与最近错误 |
 
@@ -39,6 +39,14 @@ cd esp32-dingtalk-bridge
   "weather": {"city": "北京·朝阳", "temp": 11, "text": "晴", "icon": "clear",
               "humidity": 64, "aqi_text": "空气良"},
   "lunar": "丙午马年 · 九月廿四",
+  "forecast": [
+    {"date": "11-03", "week": "周二", "lunar": "丙午马年 · 九月廿四",
+     "temp": 17, "text": "晴", "icon": "clear"},
+    {"date": "11-04", "week": "周三", "lunar": "丙午马年 · 九月廿六",
+     "temp": 13, "text": "阴", "icon": "cloud"},
+    {"date": "11-05", "week": "周四", "lunar": "丙午马年 · 九月廿七",
+     "temp": 16, "text": "雾", "icon": "fog"}
+  ],
   "stale": false,
   "server_time": "2026-11-03T10:30:00+08:00"
 }
@@ -47,6 +55,9 @@ cd esp32-dingtalk-bridge
 - `stale=true` 表示最近一次同步失败，当前返回的是旧缓存（断网时板子照常用）
 - `icon` 取值：`clear / cloud / rain / snow / thunder / fog`，板子按此选天气图标
 - 可选鉴权：`config.json` 里 `bridge_token` 非空时，请求需带头 `X-Bridge-Token`
+- **`forecast` 是三天预报**（`daily=temperature_2m_max,weather_code` + `forecast_days=3`），
+  农历和周几由服务端算好一起下发。板子每次推送都带上这三天，
+  **断开 Mac 后仍能按日期自动切换**（过 0 点自动切到下一天）
 
 ## 配置项（config.json）
 

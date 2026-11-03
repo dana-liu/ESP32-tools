@@ -2,3 +2,4 @@ flask>=3.0
 requests>=2.31
 caldav>=1.4
 zhdate>=1.1
+vobject>=0.9.9   # caldav 2.x 不再自带，缺了会导致所有日程解析失败
