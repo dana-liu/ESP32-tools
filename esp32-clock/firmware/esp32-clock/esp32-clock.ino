@@ -3,7 +3,7 @@
 //       长按主屏切换极简模式; 提前提醒弹窗 / 今天明天日程列表
 // 数据: 保留桥接服务、USB 串口协议、NVS WiFi 与原提醒状态机
 // 渲染: PSRAM 离屏画布, 秒级仅传输变化的横向区域
-// USB / WIFI / DEMO 表示数据来源, 不冒充电量或充电状态
+// USB / WIFI / DEMO 表示数据来源，电量单独显示在顶栏最右侧（BAT_ADC 实测电压）
 #include <Arduino_GFX_Library.h>
 #include <U8g2lib.h>
 #include <WiFi.h>
@@ -377,6 +377,52 @@ void wakeScreen() {
   boostBacklight();
 }
 
+// ---------------- 电池 ----------------
+// 引脚取自原理图（与 esp32-wb-status 同一块板）：IO1=BAT_ADC, IO2=BAT_EN, IO3=CHG_STAT。
+// GPIO1 属 ADC1，不受 WiFi 占用 ADC2 的影响。
+#define PIN_BAT_ADC   1
+#define PIN_CHG_STAT  3
+// 分压比 3.0（200k + 100k），不是 1/2。
+// 实测 ADC 读数 1.294V：按 2.0 折算只有 2.59V，低于锂电保护电压 2.8V ——
+// 而设备能靠电池独立跑一整夜，说明实际电压必然 ≥3.0V。按 3.0 折算是 3.88V
+// （约 66%，正在充电），与事实吻合。换板子/换批次请用串口 BAT 命令重新核对。
+#define BAT_DIV       3.0f
+
+int  batPct = -1;             // -1 = 还没读到
+bool batChg = false;
+
+// 锂电放电曲线，比线性映射准（3.7V 标称其实还有约 40%）
+static int lipoPct(float v) {
+  static const float tab[10][2] = {
+    {4.20f, 100}, {4.10f, 90}, {4.00f, 80}, {3.90f, 70}, {3.80f, 55},
+    {3.70f, 40},  {3.60f, 25}, {3.50f, 12}, {3.40f, 5},  {3.30f, 0}
+  };
+  if (v >= tab[0][0]) return 100;
+  if (v <= tab[9][0]) return 0;
+  for (int i = 0; i < 9; i++) {
+    if (v >= tab[i + 1][0]) {
+      float t = (v - tab[i + 1][0]) / (tab[i][0] - tab[i + 1][0]);
+      return (int)(tab[i + 1][1] + t * (tab[i][1] - tab[i + 1][1]) + 0.5f);
+    }
+  }
+  return 0;
+}
+
+void updateBattery() {
+  uint32_t mv = 0;
+  for (int i = 0; i < 8; i++) {           // 多次采样取平均，抑制抖动
+    mv += analogReadMilliVolts(PIN_BAT_ADC);
+    delay(2);
+  }
+  float v = (mv / 8.0f / 1000.0f) * BAT_DIV;
+  int  pct = lipoPct(v);
+  bool chg = (digitalRead(PIN_CHG_STAT) == LOW);   // 多数充电 IC：低电平 = 正在充
+  if (batPct >= 0 && (pct != batPct || chg != batChg)) forceRender = true;
+  batPct = pct;
+  batChg = chg;
+  DBG("[bat] %.2fV %d%% chg=%d\n", v, pct, chg);
+}
+
 // ---------------- 天气图标 ----------------
 void drawWeatherIcon(int cx, int cy, const char* icon) {
   if (!strcmp(icon, "rain") || !strcmp(icon, "snow") || !strcmp(icon, "thunder") ||
@@ -455,23 +501,48 @@ void drawClockSeconds(struct tm* t) {
   }
 }
 
+void drawBattery() {
+  if (batPct < 0) return;
+  const int bx = 200, by = 16, bw = 20, bh = 11;
+  uint16_t c = batChg ? C_GREEN
+             : (batPct <= 10 ? C_ACCENT : (batPct <= 25 ? C_ACCENT : C_MUTED));
+  gfx->drawRect(bx, by, bw, bh, c);
+  gfx->fillRect(bx + bw, by + 3, 2, 5, c);              // 正极凸头
+  if (batChg) {
+    // 充电中：暗绿底 + 闪电，比电量条直观
+    gfx->fillRect(bx + 2, by + 2, bw - 4, bh - 4, C(0x10, 0x2A, 0x12));
+    gfx->drawLine(bx + 11, by + 1, bx + 8,  by + 5,  C_TEXT);
+    gfx->drawLine(bx + 8,  by + 5, bx + 11, by + 5,  C_TEXT);
+    gfx->drawLine(bx + 11, by + 5, bx + 8,  by + 10, C_TEXT);
+  } else {
+    int fillW = (bw - 4) * batPct / 100;
+    if (fillW > 0) gfx->fillRect(bx + 2, by + 2, fillW, bh - 4, c);
+  }
+  char p[8];
+  snprintf(p, sizeof(p), "%d%%", batPct);
+  gfx->setFont(u8g2_font_wqy12_t_gb2312);
+  textRight(p, bx - 6, by + 10, c);
+}
+
 void drawClockHeader(struct tm* t) {
   char buf[40];
   gfx->setFont(u8g2_font_wqy12_t_gb2312);
   // 周几优先用 Mac 推来的值（跟着农历一起下来的），推不到再按本地时钟算。
   const char* wk = weekText[0] ? weekText : weekCN(t->tm_wday);
   snprintf(buf, sizeof(buf), "%02d月%02d日  %s", t->tm_mon + 1, t->tm_mday, wk);
-  drawFitText(buf, 16, 27, 150, C_TEXT);
-  // 串口连通不代表在充电; 只画代码实际能够确认的数据来源。
+  drawFitText(buf, 16, 27, 92, C_TEXT);
+  // 布局（从左到右）：日期周几 | 来源徽章 | 电量。
+  // 来源徽章原来在最右，把电量挤没了；现在电量占最右，徽章挪到它前面。
   const char* src = linkOnline ? "USB" : (demoMode ? "DEMO" :
                     (WiFi.status() == WL_CONNECTED ? "WIFI" : "LOCAL"));
   uint16_t color = linkOnline ? C_ACCENT : (demoMode ? C_MUTED : C_GREEN);
-  gfx->fillRoundRect(180, 14, 44, 19, 5, C_CARD);
+  gfx->fillRoundRect(112, 14, 42, 19, 5, C_CARD);
   gfx->setFont(u8g2_font_6x10_tf);
   int16_t x1, y1; uint16_t w, h;
   gfx->getTextBounds(src, 0, 0, &x1, &y1, &w, &h);
-  gfx->setCursor(202 - (int)w / 2 - x1, 27);
+  gfx->setCursor(133 - (int)w / 2 - x1, 27);
   gfx->setTextColor(color); gfx->print(src);
+  drawBattery();
   if (!minimalMode) gfx->drawFastHLine(16, 40, 208, C_LINE);
 }
 
@@ -1070,6 +1141,8 @@ void handleLine(char* s) {
       Serial.printf("STATE|bl|%d|%02d:%02d|%d|%d\n", blLevel,
                     lt.tm_hour, lt.tm_min, isNightNow() ? 1 : 0,
                     screenOff ? 1 : 0);
+      // 电量：百分比 / 是否充电中
+      Serial.printf("STATE|bat|%d|%d\n", batPct, batChg ? 1 : 0);
     }
     Serial.println("STATE|ok");
     return;
@@ -1087,6 +1160,17 @@ void handleLine(char* s) {
     setSoundOn(atoi(s + 4) != 0);
     Serial.printf("OK %d\n", soundOn ? 1 : 0);
     linkTouch();
+    return;
+  }
+
+  // 电量调试：立刻重采一次，把原始毫伏一起打出来（校 BAT_DIV 用）
+  if (!strcmp(s, "BAT")) {
+    uint32_t raw = 0;
+    for (int i = 0; i < 8; i++) { raw += analogReadMilliVolts(PIN_BAT_ADC); delay(2); }
+    raw /= 8;
+    updateBattery();
+    Serial.printf("BAT|%u|%.2f|%d|%d\n", (unsigned)raw,
+                  (raw / 1000.0f) * BAT_DIV, batPct, batChg ? 1 : 0);
     return;
   }
 
@@ -1272,6 +1356,8 @@ void setup() {
   Serial.setTxTimeoutMs(0);        // 写不出去立刻返回，绝不阻塞主循环
   delay(200);
   pinMode(BAT_EN, OUTPUT); digitalWrite(BAT_EN, HIGH);
+  pinMode(PIN_CHG_STAT, INPUT_PULLUP);   // 低电平 = 充电中
+  updateBattery();                       // 顶栏要显示电量，开机先采一次
   if (!gfx->begin()) Serial.println("[gfx] begin failed");
   // 背光走 PWM（夜间调光/熄屏都需要）。attach 失败就退回直连全亮。
   blPwmOk = ledcAttach(GFX_BL, BL_FREQ, BL_RES);
@@ -1353,6 +1439,13 @@ void setup() {
 void loop() {
   linkLoop();
   applyBrightness();   // 每轮算一次目标亮度（夜间 30 秒提亮到期会自动暗回去）
+
+  // 电量 30 秒采一次；变了 updateBattery 里会置 forceRender 触发整屏重绘
+  static unsigned long lastBatMs = 0;
+  if (millis() - lastBatMs > 30000UL) {
+    lastBatMs = millis();
+    updateBattery();
+  }
 
   time_t t = nowEpoch();
   struct tm tm;

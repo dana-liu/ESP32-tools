@@ -39,6 +39,7 @@
   **过 0 点自动切到下一天**，断线也能正确显示约 3 天
 - **夜间友好**：20:00~09:00 自动调暗，触碰/按键恢复全亮 30 秒；
   长按静音键熄屏，触摸/按键点亮
+- **顶栏**：日期周几 · 数据来源徽章 · 电量（电池电压实测，充电时显示闪电）
 - **预览**：`simulator/ui-preview.html`（界面）、`simulator/volume-toast-preview.html`（音量浮层与提示音，可听）
 
 ### [esp32-dingtalk-bridge](./esp32-dingtalk-bridge) — 钉钉日历桥接
