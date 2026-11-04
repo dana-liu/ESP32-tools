@@ -133,6 +133,11 @@ char snoozeKey[16] = "";   // 选择"到点再叫我"的日程
 bool snoozeDone = false;
 
 bool demoMode = true;
+// 当前屏上的日程/天气是不是开机塞的演示数据。
+// USB 模式下没有 WiFi 凭据 → demoMode 恒为 true → 每次开机都会注入 4 条演示日程。
+// 这些假数据看起来和真日程一模一样，一旦 Mac 开始喂真数据就必须整体撤掉，
+// 否则桥接没跑/拉不到日程时，屏幕上会一直挂着「测试数据」冒充真日程。
+bool demoData = false;
 time_t baseEpoch = 0;
 unsigned long baseMillis = 0;
 unsigned long lastSyncMs = 0;
@@ -959,7 +964,32 @@ static int evGot = 0;
 
 void linkTouch() { linkOnline = true; lastLinkMs = millis(); }
 
+// 撤掉开机注入的演示数据（日程 + 天气 + 农历 + 城市/空气质量）。
+// 只在收到真实数据指令时调用 —— 演示内容必须整体消失，不能和真数据混在一起。
+static void dropDemoData() {
+  if (!demoData) return;
+  demoData = false;
+  eventCount = 0;
+  tempVal = -999;                       // 让天气区显示「天气暂未同步」
+  weatherText[0] = 0;
+  weatherIcon[0] = 0;
+  cityText[0] = 0;
+  aqiText[0] = 0;
+  lunarText[0] = 0;
+  forceRender = true;
+  DBG("[demo] 演示数据已撤掉\n");
+}
+
 void handleLine(char* s) {
+  // 只有真正的数据指令才撤演示数据；STATE/BAT/BL|/VOL| 这类调试命令不算，
+  // 免得只是想读一下状态就把屏幕清空。
+  if (!strncmp(s, "TIME|", 5) || !strcmp(s, "NONE") ||
+      !strncmp(s, "EVENTS|", 7) || !strncmp(s, "WEATHER|", 8) ||
+      !strncmp(s, "LUNAR|", 6) || !strncmp(s, "NEXT|", 5) ||
+      !strncmp(s, "DAYS|", 5) || !strncmp(s, "DAY|", 4)) {
+    dropDemoData();
+  }
+
   if (!strcmp(s, "PING")) { Serial.println("PONG"); linkTouch(); return; }
 
   if (!strncmp(s, "TIME|", 5)) {
@@ -1144,6 +1174,8 @@ void handleLine(char* s) {
                     screenOff ? 1 : 0);
       // 电量：百分比 / 是否充电中
       Serial.printf("STATE|bat|%d|%d\n", batPct, batChg ? 1 : 0);
+      // 屏上是不是演示数据（1 = 还没收到真数据）
+      Serial.printf("STATE|demo|%d\n", demoData ? 1 : 0);
     }
     Serial.println("STATE|ok");
     return;
@@ -1433,7 +1465,7 @@ void setup() {
     }
   }
 
-  if (eventCount == 0 && demoMode) initDemoEvents();
+  if (eventCount == 0 && demoMode) { initDemoEvents(); demoData = true; }
   render();
 }
 
