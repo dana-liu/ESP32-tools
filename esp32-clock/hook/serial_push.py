@@ -42,6 +42,7 @@ import glob
 import json
 import os
 import select
+import signal
 import sys
 import termios
 import time
@@ -442,6 +443,10 @@ def main():
 
 
 if __name__ == "__main__":
+    # SIGTERM（被 kill / 任务管理器停掉）也走正常退出路径，让串口 fd 正常关闭。
+    # 直接被打断时 USB CDC 端点可能停在半截，设备会从 USB 总线上掉下去，
+    # 只能重新插线才回来 —— 这个坑踩过两次了。
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     try:
         sys.exit(main())
     except KeyboardInterrupt:
