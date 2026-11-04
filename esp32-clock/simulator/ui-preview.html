@@ -1,7 +1,455 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>esp32-clock · 界面模拟器</title>
+<!--
+  esp32-clock 界面模拟器 —— 与 firmware/esp32-clock/esp32-clock.ino 的绘制代码一一对应。
+  改界面前先在这里调，不用烧板子。坐标/颜色/字号都照抄固件，改这里就要同步改固件。
+
+  对应关系：
+    drawClockHeader()  日期周几 | 数据来源徽章 | 电量
+    drawClockTime()    logisoso78，基线 122（极简 125）
+    drawClockSeconds() 日常：右侧圆点 + "27 秒"；极简：进度条 + 居中秒数
+    drawMainWeather()  图标(29,173) + 温度(49,181) + 文案 + 城市·AQI(49,195)
+    drawBigCard()      16,201 208×38 日程卡
+    drawList()         日程列表，每行 26 高，间距 28
+    drawPopup()        提醒弹窗 + 两个按钮
+    drawVolumeToast()  132×40 深色胶囊，y=6
+-->
 <style>
-.clock-redesign{font-family:var(--font-sans,Arial,sans-serif);color:var(--color-text-primary,#282824)}.clock-redesign .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}.clock-redesign .toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:24px}.clock-redesign button{font:400 12px var(--font-sans,Arial,sans-serif);padding:7px 13px;border:0.5px solid #d3d1c7;border-radius:8px;background:#fff;color:#444441;cursor:pointer}.clock-redesign button[aria-pressed=true]{background:#faece7;border-color:#d85a30;color:#993c1d}.clock-redesign .views{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:36px}.clock-redesign figure{margin:0;text-align:center}.clock-redesign figcaption{font-size:12px;font-weight:400;color:#5f5e5a;margin-bottom:14px}.clock-redesign .case{padding:20px;border:0.5px solid #d3d1c7;border-radius:34px;background:#fff}.clock-redesign .bezel{padding:9px;background:#efeee9;border:0.5px solid #d3d1c7;border-radius:14px}.clock-redesign .screen-large{display:block;width:312px;height:312px}.clock-redesign .actual{display:block;width:240px;height:240px;border:0.5px solid #d3d1c7}.clock-redesign .cable{margin:0 auto;width:31px;height:24px;background:#f1efe8;border:0.5px solid #d3d1c7;border-top:0;border-radius:0 0 6px 6px}.clock-redesign .scale-mark{font-size:11px;color:#888780;margin-top:14px}.clock-redesign label{display:flex;align-items:center;gap:5px;font-size:12px;color:#5f5e5a;margin-left:4px}@media(max-width:400px){.clock-redesign .screen-large{width:264px;height:264px}.clock-redesign .case{padding:14px}}
+  :root{
+    --bg:#f7f5ef; --card:#efece3; --line:#dedbd3; --text:#2c2c2a;
+    --muted:#5f5e5a; --accent:#993c1d; --accentl:#faece7; --orange:#d85a30;
+    --green:#0f6e56;
+  }
+  body{margin:0;padding:24px;background:#f1efe8;
+       font-family:-apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;color:#2c2c2a}
+  h1{font-size:15px;font-weight:500;margin:0 0 4px}
+  .sub{font-size:12px;color:#5f5e5a;margin:0 0 20px}
+  .wrap{display:flex;gap:36px;flex-wrap:wrap;align-items:flex-start}
+  .panel{background:#fff;border:1px solid #dedbd3;border-radius:12px;padding:16px 18px;min-width:250px}
+  .panel h2{font-size:12px;font-weight:500;color:#5f5e5a;margin:0 0 8px;letter-spacing:.04em}
+  .row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px}
+  .row:last-child{margin-bottom:0}
+  button{font:400 12px inherit;padding:6px 11px;border:1px solid #d3d1c7;border-radius:7px;
+         background:#fff;color:#444441;cursor:pointer}
+  button:hover{border-color:#b4b2a9}
+  button[aria-pressed="true"]{background:#faece7;border-color:#d85a30;color:#993c1d}
+  .screenbox{text-align:center}
+  .bezel{display:inline-block;padding:10px;background:#efeee9;border:1px solid #d3d1c7;border-radius:16px}
+  svg.screen{display:block;border-radius:3px}
+  .cap{font-size:12px;color:#5f5e5a;margin-bottom:10px}
+  .hint{font-size:11px;color:#888780;margin-top:10px;line-height:1.6}
+  .bright{transition:filter .25s ease}
 </style>
-<section class="clock-redesign"><h2 class="sr-only">ESP32 方形时钟的暖白日常模式和极简模式，可切换供电状态并演示秒数变化。</h2><div class="toolbar"><button id="clk-daily" type="button" aria-pressed="true">日常模式</button><button id="clk-minimal" type="button" aria-pressed="false">极简模式</button><button id="clk-power" type="button" aria-pressed="false">切换电池供电</button><label><input id="clk-tick" type="checkbox">演示走时</label></div><div class="views"><figure><figcaption>外壳搭配 · 放大预览</figcaption><div class="case"><div class="bezel"><svg id="clk-large" class="screen-large" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" role="img" aria-label="暖白色时钟界面"><rect width="240" height="240" fill="#f7f5ef"/><g font-family="Arial,'PingFang SC','Microsoft YaHei',sans-serif" font-weight="400"><text x="16" y="28" fill="#444441" font-size="13">11月03日<tspan x="104" font-size="12">周二</tspan></text><path d="M194 20l-4 6h5l-2 6 8-9h-5l2-3" fill="#993c1d"/><path d="M207 21h15v10h-15zM224 24v4" fill="none" stroke="#5f5e5a" stroke-width="1.2"/><rect x="210" y="24" width="9" height="4" fill="#5f5e5a"/><path d="M16 45h208" fill="none" stroke="#dedbd3"/><text x="120" y="119" text-anchor="middle" fill="#2c2c2a" font-size="76" font-weight="500" textLength="210" lengthAdjust="spacingAndGlyphs" style="font-variant-numeric:tabular-nums">11:35</text><text x="16" y="142" fill="#5f5e5a" font-size="11">北京时间</text><circle cx="181" cy="138" r="2" fill="#d85a30"/><text x="224" y="142" text-anchor="end" fill="#993c1d" font-size="12">27 秒</text><path d="M16 158h208" fill="none" stroke="#dedbd3"/><circle cx="30" cy="183" r="7" fill="#faece7" stroke="#d85a30" stroke-width="1.5"/><path d="M30 169v3m0 22v3m-14-14h3m22 0h3m-24-10 2 2m16 16 2 2m-20 0 2-2m16-16 2-2" fill="none" stroke="#d85a30" stroke-width="1.5" stroke-linecap="round"/><text x="54" y="184" fill="#2c2c2a" font-size="22" font-weight="500">22°<tspan x="101" y="182" font-size="13" font-weight="400">晴</tspan></text><text x="54" y="201" fill="#5f5e5a" font-size="11">北京 · 空气优</text><path d="M217 179l4 4-4 4" fill="none" stroke="#888780" stroke-width="1.2"/><path d="M16 213h208" fill="none" stroke="#dedbd3"/><text x="16" y="232" fill="#5f5e5a" font-size="11">九月廿四</text><text x="224" y="232" text-anchor="end" fill="#5f5e5a" font-size="11">今日无日程</text></g></svg></div></div><div class="cable"></div></figure><figure><figcaption>实际像素 · 240 × 240</figcaption><svg id="clk-actual" class="actual" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" role="img" aria-label="原始240像素界面"></svg><div class="scale-mark">1 : 1 逻辑像素</div></figure></div></section>
+
+<div class="wrap">
+  <div>
+    <h1>esp32-clock · 界面模拟器</h1>
+    <p class="sub">与固件 v2 的绘制坐标一一对应 · 触摸/长按/夜间/熄屏都能试</p>
+
+    <div class="panel">
+      <h2>界面</h2>
+      <div class="row">
+        <button id="b-daily" aria-pressed="true">日常模式</button>
+        <button id="b-minimal" aria-pressed="false">极简模式</button>
+        <button id="b-list" aria-pressed="false">日程列表</button>
+        <button id="b-popup" aria-pressed="false">提醒弹窗</button>
+      </div>
+
+      <h2>数据来源徽章</h2>
+      <div class="row">
+        <button id="s-USB" aria-pressed="true">USB</button>
+        <button id="s-WIFI" aria-pressed="false">WIFI</button>
+        <button id="s-LOCAL" aria-pressed="false">LOCAL</button>
+        <button id="s-DEMO" aria-pressed="false">DEMO</button>
+      </div>
+
+      <h2>电量</h2>
+      <div class="row">
+        <button id="p-chg" aria-pressed="true">充电中 71%</button>
+        <button id="p-ok" aria-pressed="false">正常 71%</button>
+        <button id="p-low" aria-pressed="false">低电 12%</button>
+      </div>
+
+      <h2>背光</h2>
+      <div class="row">
+        <button id="b-night" aria-pressed="false">夜间调光 12%</button>
+        <button id="b-off" aria-pressed="false">熄屏</button>
+      </div>
+
+      <h2>音量</h2>
+      <div class="row">
+        <button id="v-down">音量 −</button>
+        <button id="v-up">音量 +</button>
+        <button id="v-mute" aria-pressed="false">静音</button>
+      </div>
+
+      <h2>其它</h2>
+      <div class="row">
+        <button id="b-tick" aria-pressed="false">走时演示</button>
+      </div>
+    </div>
+
+    <p class="hint">
+      点屏幕 = 触摸（夜间提亮 30 秒 / 熄屏时点亮）<br>
+      长按屏幕 0.65 秒 = 切换日常 / 极简<br>
+      左右滑动屏幕 = 切换日程卡片
+    </p>
+  </div>
+
+  <div class="screenbox">
+    <div class="cap">实际像素 · 240 × 240（1:1）</div>
+    <div class="bezel">
+      <svg id="screen" class="screen bright" width="240" height="240" viewBox="0 0 240 240"
+           role="img" aria-label="esp32-clock 界面预览"></svg>
+    </div>
+  </div>
+</div>
+
 <script>
-(function(){let mode='daily',battery=false,total=11*3600+35*60+27;const large=document.getElementById('clk-large'),actual=document.getElementById('clk-actual'),daily=document.getElementById('clk-daily'),minimal=document.getElementById('clk-minimal'),power=document.getElementById('clk-power'),tick=document.getElementById('clk-tick');const line='<path d="M16 45h208" fill="none" stroke="#dedbd3"/>';function render(){const h=String(Math.floor(total/3600)%24).padStart(2,'0'),m=String(Math.floor(total/60)%60).padStart(2,'0'),s=String(total%60).padStart(2,'0');const status=battery?'<text x="203" y="28" text-anchor="end" fill="#5f5e5a" font-size="11">82%</text><path d="M207 21h15v10h-15zM224 24v4" fill="none" stroke="#5f5e5a" stroke-width="1.2"/><rect x="210" y="24" width="8" height="4" fill="#5f5e5a"/>':'<path d="M194 20l-4 6h5l-2 6 8-9h-5l2-3" fill="#993c1d"/><path d="M207 21h15v10h-15zM224 24v4" fill="none" stroke="#5f5e5a" stroke-width="1.2"/><rect x="210" y="24" width="9" height="4" fill="#5f5e5a"/>';let content;if(mode==='daily'){content='<text x="16" y="28" fill="#444441" font-size="13">11月03日<tspan x="104" font-size="12">周二</tspan></text>'+status+line+'<text x="120" y="119" text-anchor="middle" fill="#2c2c2a" font-size="76" font-weight="500" textLength="210" lengthAdjust="spacingAndGlyphs" style="font-variant-numeric:tabular-nums">'+h+':'+m+'</text><text x="16" y="142" fill="#5f5e5a" font-size="11">北京时间</text><circle cx="181" cy="138" r="2" fill="#d85a30"/><text x="224" y="142" text-anchor="end" fill="#993c1d" font-size="12">'+s+' 秒</text><path d="M16 158h208" fill="none" stroke="#dedbd3"/><circle cx="30" cy="183" r="7" fill="#faece7" stroke="#d85a30" stroke-width="1.5"/><path d="M30 169v3m0 22v3m-14-14h3m22 0h3m-24-10 2 2m16 16 2 2m-20 0 2-2m16-16 2-2" fill="none" stroke="#d85a30" stroke-width="1.5" stroke-linecap="round"/><text x="54" y="184" fill="#2c2c2a" font-size="22" font-weight="500">22°<tspan x="101" y="182" font-size="13" font-weight="400">晴</tspan></text><text x="54" y="201" fill="#5f5e5a" font-size="11">北京 · 空气优</text><path d="M217 179l4 4-4 4" fill="none" stroke="#888780" stroke-width="1.2"/><path d="M16 213h208" fill="none" stroke="#dedbd3"/><text x="16" y="232" fill="#5f5e5a" font-size="11">九月廿四</text><text x="224" y="232" text-anchor="end" fill="#5f5e5a" font-size="11">今日无日程</text>';}else{content='<text x="16" y="28" fill="#444441" font-size="12">11月03日 · 周二</text>'+status+'<text x="120" y="125" text-anchor="middle" fill="#2c2c2a" font-size="83" font-weight="500" textLength="210" lengthAdjust="spacingAndGlyphs" style="font-variant-numeric:tabular-nums">'+h+':'+m+'</text><rect x="24" y="150" width="192" height="2" rx="1" fill="#dedbd3"/><rect x="24" y="150" width="'+Math.round((total%60)/60*192)+'" height="2" rx="1" fill="#d85a30"/><text x="120" y="177" text-anchor="middle" fill="#993c1d" font-size="12">'+s+' 秒</text><text x="120" y="219" text-anchor="middle" fill="#5f5e5a" font-size="12">农历九月廿四</text>';}const svg='<title>240×240 '+(mode==='daily'?'日常':'极简')+'时钟</title><desc>暖白底深灰时间，橙色秒数；天气、农历与供电均为演示数据。</desc><rect width="240" height="240" fill="#f7f5ef"/><g font-family="Arial,\'PingFang SC\',\'Microsoft YaHei\',sans-serif" font-weight="400">'+content+'</g>';large.innerHTML=svg;actual.innerHTML=svg;daily.setAttribute('aria-pressed',mode==='daily');minimal.setAttribute('aria-pressed',mode==='minimal');power.setAttribute('aria-pressed',battery);power.textContent=battery?'切换 USB 供电':'切换电池供电';}daily.onclick=function(){mode='daily';render();};minimal.onclick=function(){mode='minimal';render();};power.onclick=function(){battery=!battery;render();};render();setInterval(function(){if(tick.checked){total=(total+1)%86400;render();}},1000);})();
+(function(){
+  "use strict";
+
+  // ---- 固件里的颜色，逐个照抄 ----
+  const C_BG="#f7f5ef", C_CARD="#efece3", C_LINE="#dedbd3", C_TEXT="#2c2c2a",
+        C_MUTED="#5f5e5a", C_ACCENT="#993c1d", C_ACCENTL="#faece7",
+        C_ORANGE="#d85a30", C_GREEN="#0f6e56";
+
+  const WEEK=["周日","周一","周二","周三","周四","周五","周六"];
+
+  // ---- 状态（镜像固件的全局变量）----
+  const S = {
+    screen:"main",        // main | list | popup
+    minimal:false,
+    src:"USB",
+    batPct:71, charging:true,
+    night:false,          // 模拟 20:00~09:00
+    boosted:false,        // 夜间被碰后 30 秒提亮
+    off:false,            // 熄屏
+    vol:60, soundOn:true, toastUntil:0,
+    cardIndex:0,
+    total:11*3600+35*60+27,   // 11:35:27
+    tick:false,
+    boostTimer:null, toastTimer:null
+  };
+
+  // 日程：格式与 EVENT| 行一致（月.日 / 时:分 / 剩余分钟 / 全天 / 标题 / 来源）
+  const EVENTS = [
+    {date:"11.04", time:"19:30", mins:10, allDay:false, title:"备赛课二期提测", src:"钉钉"},
+    {date:"11.05", time:"10:00", mins:1295, allDay:false, title:"课程组周会", src:"钉钉"},
+    {date:"11.05", time:"20:00", mins:1895, allDay:false, title:"版本上线窗口", src:"本地"}
+  ];
+
+  const DAYS = {
+    lunar:"丙午马年 · 九月廿六",
+    temp:11, text:"阴", icon:"cloud", city:"北京·朝阳", aqi:"重度污染"
+  };
+
+  const svg = document.getElementById("screen");
+
+  // ---- 小工具 ----
+  function esc(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+  // 固件的 drawFitText：超宽就截断加省略号（这里按字宽粗算，够用）
+  function fit(s, maxW, fs){
+    const per = /[\u4e00-\u9fa5]/.test(s) ? fs : fs*0.62;
+    const n = Math.floor(maxW / per);
+    return s.length > n ? s.slice(0, Math.max(1,n-1))+"…" : s;
+  }
+  function text(x,y,s,{fs=12,fill=C_TEXT,anchor="start",weight=400,family="cjk",extra=""}={}){
+    const ff = family==="num"
+      ? 'font-family:"Helvetica Neue",Arial,sans-serif;font-variant-numeric:tabular-nums'
+      : 'font-family:"PingFang SC","Microsoft YaHei",sans-serif';
+    return `<text x="${x}" y="${y}" font-size="${fs}" fill="${fill}" text-anchor="${anchor}" `
+         + `font-weight="${weight}" style="${ff}"${extra}>${esc(s)}</text>`;
+  }
+  function icon(cx,cy,name){
+    const c = name==="rain"||name==="snow"||name==="thunder"||name==="cloud";
+    if(!c){ // clear：太阳
+      return `<circle cx="${cx}" cy="${cy}" r="7" fill="none" stroke="${C_ORANGE}" stroke-width="1.5"/>`
+           + `<path d="M${cx} ${cy-13}v3M${cx} ${cy+10}v3M${cx-13} ${cy}h3M${cx+10} ${cy}h3`
+           + `M${cx-9} ${cy-9}l2 2M${cx+7} ${cy+7}l2 2M${cx-9} ${cy+9}l2-2M${cx+7} ${cy-7}l2-2"`
+           + `" fill="none" stroke="${C_ORANGE}" stroke-width="1.5" stroke-linecap="round"/>`;
+    }
+    let out = `<circle cx="${cx-5}" cy="${cy-2}" r="5" fill="${C_MUTED}"/>`
+            + `<circle cx="${cx+4}" cy="${cy-2}" r="6" fill="${C_MUTED}"/>`
+            + `<rect x="${cx-8}" y="${cy-2}" width="18" height="5" fill="${C_MUTED}"/>`;
+    if(name==="rain")   out += `<path d="M${cx-6} ${cy+6}l-2 4M${cx} ${cy+6}l-2 4M${cx+6} ${cy+6}l-2 4" fill="none" stroke="${C_ORANGE}" stroke-width="1.5" stroke-linecap="round"/>`;
+    if(name==="snow")   out += `<circle cx="${cx-6}" cy="${cy+8}" r="1" fill="${C_MUTED}"/><circle cx="${cx}" cy="${cy+8}" r="1" fill="${C_MUTED}"/><circle cx="${cx+6}" cy="${cy+8}" r="1" fill="${C_MUTED}"/>`;
+    if(name==="thunder")out += `<path d="M${cx} ${cy+5}l3 4h-5l3 3" fill="none" stroke="${C_ORANGE}" stroke-width="1.5" stroke-linejoin="round"/>`;
+    if(name==="fog")    out += `<path d="M${cx-8} ${cy+1}h16M${cx-8} ${cy+5}h16M${cx-8} ${cy+9}h16" fill="none" stroke="${C_MUTED}" stroke-width="1.2" stroke-linecap="round"/>`;
+    return out;
+  }
+
+  // ---- drawBattery() ----
+  function battery(){
+    const bx=200, by=16, bw=20, bh=11;
+    const c = S.charging ? C_GREEN : (S.batPct<=25 ? C_ACCENT : C_MUTED);
+    let out = `<rect x="${bx}" y="${by}" width="${bw}" height="${bh}" fill="none" stroke="${c}"/>`
+            + `<rect x="${bx+bw}" y="${by+3}" width="2" height="5" fill="${c}"/>`;
+    if(S.charging){
+      out += `<rect x="${bx+2}" y="${by+2}" width="${bw-4}" height="${bh-4}" fill="${C_GREEN}"/>`;
+      // 两个三角拼成闪电（固件用 fillTriangle）
+      out += `<polygon points="${bx+11},${by+2} ${bx+7},${by+6} ${bx+10},${by+6}" fill="${C_BG}"/>`;
+      out += `<polygon points="${bx+10},${by+9} ${bx+14},${by+5} ${bx+11},${by+5}" fill="${C_BG}"/>`;
+    }else{
+      const fw = Math.round((bw-4)*S.batPct/100);
+      if(fw>0) out += `<rect x="${bx+2}" y="${by+2}" width="${fw}" height="${bh-4}" fill="${c}"/>`;
+    }
+    out += text(bx-6, by+10, S.batPct+"%", {fill:c, anchor:"end"});
+    return out;
+  }
+
+  // ---- drawClockHeader() ----
+  function header(t){
+    const dd = t.getDate(), mo = t.getMonth()+1, wk = WEEK[t.getDay()];
+    const dateStr = `${String(mo).padStart(2,"0")}月${String(dd).padStart(2,"0")}日  ${wk}`;
+    let out = text(16,27, fit(dateStr,92,12));
+    // 来源徽章：x=112 w=42，中心 133
+    const badgeColor = S.src==="USB" ? C_ACCENT : (S.src==="DEMO" ? C_MUTED : C_GREEN);
+    out += `<rect x="112" y="14" width="42" height="19" rx="5" fill="${C_CARD}"/>`;
+    out += text(133, 27, S.src, {fs:9, fill:badgeColor, anchor:"middle", family:"num"});
+    out += battery();
+    if(!S.minimal) out += `<line x1="16" y1="40" x2="224" y2="40" stroke="${C_LINE}"/>`;
+    return out;
+  }
+
+  // ---- drawMain() ----
+  function mainScreen(t){
+    const hh = String(t.getHours()).padStart(2,"0");
+    const mm = String(t.getMinutes()).padStart(2,"0");
+    const ss = String(t.getSeconds()).padStart(2,"0");
+    let out = header(t);
+
+    // 大字时间：logisoso78，基线 122 / 极简 125。
+    // textLength 固定 196 是照 logisoso78 的实际字宽锁死的 —— 不锁的话
+    // 换台机器（Helvetica/苹方字宽不同）就可能顶出 240 边界。
+    out += text(120, S.minimal?125:122, `${hh}:${mm}`,
+                {fs:78, anchor:"middle", weight:500, family:"num",
+                 extra:' textLength="196" lengthAdjust="spacingAndGlyphs"'});
+
+    if(S.minimal){
+      // 进度条 + 居中秒数
+      out += `<rect x="24" y="150" width="192" height="2" rx="1" fill="${C_LINE}"/>`;
+      const p = Math.round(192*t.getSeconds()/60);
+      if(p>0) out += `<rect x="24" y="150" width="${p}" height="2" rx="1" fill="${C_ORANGE}"/>`;
+      out += text(120, 178, `${ss} 秒`, {fill:C_ACCENT, anchor:"middle"});
+      out += text(120, 216, fit(DAYS.lunar,208,12), {fill:C_MUTED, anchor:"middle"});
+      return out;
+    }
+
+    // 日常：右侧圆点 + 秒数
+    out += `<circle cx="181" cy="139" r="2" fill="${C_ORANGE}"/>`;
+    out += text(224, 143, `${ss} 秒`, {fill:C_ACCENT, anchor:"end"});
+
+    // 农历
+    out += text(16, 143, fit(DAYS.lunar,152,12), {fill:C_MUTED});
+    out += `<line x1="16" y1="153" x2="224" y2="153" stroke="${C_LINE}"/>`;
+
+    // 天气
+    out += icon(29,173,DAYS.icon);
+    const tempStr = String(DAYS.temp);
+    out += text(49, 181, tempStr, {fs:24, weight:500, family:"num"});
+    const tw = tempStr.length*14;
+    out += `<circle cx="${49+tw+4}" cy="165" r="2" fill="${C_TEXT}"/>`;
+    out += text(49+tw+15, 178, DAYS.text, {fs:13});
+    out += text(49, 195, `${DAYS.city} · ${DAYS.aqi}`, {fs:11, fill:C_MUTED});
+
+    // 日程卡 / 无日程
+    if(EVENTS.length){
+      const e = EVENTS[S.cardIndex % EVENTS.length];
+      const upcoming = !e.allDay && e.mins>0;
+      out += `<rect x="16" y="201" width="208" height="38" rx="7" fill="${upcoming?C_ACCENTL:C_CARD}"/>`;
+      out += `<rect x="16" y="207" width="2" height="26" fill="${upcoming?C_ORANGE:C_MUTED}"/>`;
+      out += text(26, 215, fit(`${e.time} · ${e.src}`,112,12), {fill:C_ACCENT});
+      const status = e.allDay ? "全天" : (e.mins>0 ? `${e.mins} 分钟后` : "已开始");
+      out += text(215, 215, status, {fill:C_ACCENT, anchor:"end"});
+      out += text(26, 232, fit(e.title, EVENTS.length>1?164:189,12));
+      if(EVENTS.length>1)
+        out += text(216, 232, `${S.cardIndex%EVENTS.length+1}/${EVENTS.length}`, {fs:9, fill:C_MUTED, anchor:"end", family:"num"});
+    }else{
+      out += `<line x1="16" y1="208" x2="224" y2="208" stroke="${C_LINE}"/>`;
+      out += text(16, 231, "今日暂无日程", {fill:C_MUTED});
+      out += `<path d="M216 222l4 4-4 4" fill="none" stroke="${C_MUTED}" stroke-width="1.2"/>`;
+    }
+    return out;
+  }
+
+  // ---- drawList() ----
+  function listScreen(){
+    const sorted = EVENTS.slice().sort((a,b)=>
+      (a.date+a.time) < (b.date+b.time) ? -1 : 1);
+    let out = text(16, 27, "日程", {fs:16});
+    out += text(224, 26, sorted.length ? `1/1 页 · ${sorted.length} 条` : "共 0 条",
+                {fill:C_MUTED, anchor:"end"});
+    out += `<line x1="16" y1="37" x2="224" y2="37" stroke="${C_LINE}"/>`;
+    if(!sorted.length){
+      out += text(16, 104, "今天和明天都没有日程", {fill:C_MUTED});
+      return out;
+    }
+    sorted.forEach((e,i)=>{
+      const y = 56 + i*28;
+      const first = i===0;
+      out += `<rect x="16" y="${y}" width="208" height="26" rx="6" fill="${first?C_ACCENTL:C_CARD}"/>`;
+      out += `<rect x="16" y="${y+4}" width="2" height="18" fill="${first?C_ORANGE:C_LINE}"/>`;
+      out += text(26, y+17, fit(e.title, 130, 12));
+      out += text(216, y+17, `${e.date.replace(".","-")} ${e.time}`, {fill:C_MUTED, anchor:"end"});
+    });
+    return out;
+  }
+
+  // ---- drawPopup() ----
+  function popupScreen(t){
+    const e = EVENTS[0];
+    const hh = String(t.getHours()).padStart(2,"0");
+    const mm = String(t.getMinutes()).padStart(2,"0");
+    let out = text(16, 27, "日程提醒", {fill:C_ACCENT});
+    out += text(224, 27, `${hh}:${mm}`, {fs:9, fill:C_MUTED, anchor:"end", family:"num"});
+    out += `<line x1="16" y1="40" x2="224" y2="40" stroke="${C_LINE}"/>`;
+    // 铃铛
+    out += `<circle cx="120" cy="65" r="18" fill="${C_ACCENTL}"/>`
+         + `<circle cx="120" cy="60" r="7" fill="${C_ORANGE}"/>`
+         + `<rect x="113" y="60" width="14" height="12" fill="${C_ORANGE}"/>`
+         + `<rect x="110" y="71" width="20" height="3" rx="1" fill="${C_ORANGE}"/>`
+         + `<circle cx="120" cy="78" r="2" fill="${C_ORANGE}"/>`;
+    out += text(120, 106, e.mins>0 ? `还有 ${e.mins} 分钟` : "日程开始了",
+                {fs:16, anchor:"middle"});
+    out += text(120, 130, fit(e.title,208,12), {anchor:"middle"});
+    out += text(120, 171, `${e.time} · ${e.src}`, {fill:C_MUTED, anchor:"middle"});
+    out += `<rect x="16" y="188" width="96" height="40" rx="8" fill="${C_ACCENT}"/>`;
+    out += text(64, 212, "知道了", {fill:C_BG, anchor:"middle"});
+    out += `<rect x="124" y="188" width="100" height="40" rx="8" fill="${C_CARD}" stroke="${C_LINE}"/>`;
+    out += text(174, 212, "到点再叫我", {anchor:"middle"});
+    return out;
+  }
+
+  // ---- drawVolumeToast() ----
+  function toast(){
+    if(!S.toastUntil || Date.now() > S.toastUntil) return "";
+    const w=132,h=40,x=54,y=6;
+    const label = !S.soundOn ? "已静音" : `音量 ${S.vol}%`;
+    let out = `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="12" fill="${C_TEXT}"/>`;
+    out += text(120, y+20, label, {fill:C_BG, anchor:"middle"});
+    const barX=x+14, barW=w-28;
+    out += `<rect x="${barX}" y="${y+27}" width="${barW}" height="4" rx="2" fill="${C_MUTED}"/>`;
+    const fill = S.soundOn ? Math.round(barW*S.vol/100) : 0;
+    if(fill>0) out += `<rect x="${barX}" y="${y+27}" width="${Math.max(4,fill)}" height="4" rx="2" fill="${C_BG}"/>`;
+    return out;
+  }
+
+  function render(){
+    const now = new Date(2026, 10, 4);
+    now.setSeconds(S.total % 86400);
+    const body =
+      S.screen==="list"  ? listScreen() :
+      S.screen==="popup" ? popupScreen(now) :
+                           mainScreen(now);
+    svg.innerHTML = `<rect width="240" height="240" fill="${C_BG}"/>` + body + toast();
+
+    // 背光：熄屏全黑，夜间未提亮则压暗
+    const dim = S.off ? 0 : (S.night && !S.boosted ? 0.28 : 1);
+    svg.style.filter = `brightness(${dim})`;
+  }
+
+  // ---- 交互 ----
+  function setMode(minimal){
+    S.minimal = minimal;
+    document.getElementById("b-daily").setAttribute("aria-pressed", String(!minimal));
+    document.getElementById("b-minimal").setAttribute("aria-pressed", String(minimal));
+    render();
+  }
+  function setScreen(scr){
+    S.screen = scr;
+    document.getElementById("b-list").setAttribute("aria-pressed", String(scr==="list"));
+    document.getElementById("b-popup").setAttribute("aria-pressed", String(scr==="popup"));
+    render();
+  }
+  function setSrc(src){
+    S.src = src;
+    for(const v of ["USB","WIFI","LOCAL","DEMO"])
+      document.getElementById("s-"+v).setAttribute("aria-pressed", String(v===src));
+    render();
+  }
+  function setBat(mode){
+    S.charging = mode==="chg";
+    S.batPct = mode==="low" ? 12 : 71;
+    document.getElementById("p-chg").setAttribute("aria-pressed", String(mode==="chg"));
+    document.getElementById("p-ok").setAttribute("aria-pressed", String(mode==="ok"));
+    document.getElementById("p-low").setAttribute("aria-pressed", String(mode==="low"));
+    render();
+  }
+  // 触摸 = 夜间提亮 30 秒 / 熄屏点亮（固件 wakeScreen + boostBacklight）
+  function boost(){
+    if(S.off){ S.off=false; document.getElementById("b-off").setAttribute("aria-pressed","false"); }
+    S.boosted = true;
+    clearTimeout(S.boostTimer);
+    S.boostTimer = setTimeout(()=>{ S.boosted=false; render(); }, 30000);
+    render();
+  }
+  function toastFlash(){
+    S.toastUntil = Date.now() + 1000;
+    clearTimeout(S.toastTimer);
+    S.toastTimer = setTimeout(render, 1050);
+    render();
+  }
+
+  document.getElementById("b-daily").onclick   = ()=>setMode(false);
+  document.getElementById("b-minimal").onclick = ()=>setMode(true);
+  document.getElementById("b-list").onclick    = ()=>setScreen(S.screen==="list"?"main":"list");
+  document.getElementById("b-popup").onclick   = ()=>setScreen(S.screen==="popup"?"main":"popup");
+  for(const v of ["USB","WIFI","LOCAL","DEMO"])
+    document.getElementById("s-"+v).onclick = ()=>setSrc(v);
+  document.getElementById("p-chg").onclick = ()=>setBat("chg");
+  document.getElementById("p-ok").onclick  = ()=>setBat("ok");
+  document.getElementById("p-low").onclick = ()=>setBat("low");
+
+  document.getElementById("b-night").onclick = e=>{
+    S.night = !S.night; S.boosted = false;
+    e.currentTarget.setAttribute("aria-pressed", String(S.night));
+    render();
+  };
+  document.getElementById("b-off").onclick = e=>{
+    S.off = !S.off;
+    e.currentTarget.setAttribute("aria-pressed", String(S.off));
+    render();
+  };
+  document.getElementById("v-up").onclick = ()=>{
+    S.vol = Math.min(100, S.vol+5); S.soundOn = true;
+    document.getElementById("v-mute").setAttribute("aria-pressed","false");
+    toastFlash();
+  };
+  document.getElementById("v-down").onclick = ()=>{
+    S.vol = Math.max(0, S.vol-5); S.soundOn = true;
+    document.getElementById("v-mute").setAttribute("aria-pressed","false");
+    toastFlash();
+  };
+  document.getElementById("v-mute").onclick = e=>{
+    S.soundOn = !S.soundOn;
+    e.currentTarget.setAttribute("aria-pressed", String(!S.soundOn));
+    toastFlash();
+  };
+  document.getElementById("b-tick").onclick = e=>{
+    S.tick = !S.tick;
+    e.currentTarget.setAttribute("aria-pressed", String(S.tick));
+  };
+
+  // 屏幕手势：轻点=触摸，长按 0.65s=切模式，左右滑=切卡片
+  let pressAt = 0, startX = 0;
+  svg.addEventListener("pointerdown", e=>{ pressAt = Date.now(); startX = e.clientX; });
+  svg.addEventListener("pointerup", e=>{
+    const held = Date.now() - pressAt;
+    const dx = e.clientX - startX;
+    if(held >= 650){ setMode(!S.minimal); return; }
+    if(Math.abs(dx) > 30 && S.screen==="main" && EVENTS.length > 1){
+      S.cardIndex = (S.cardIndex + (dx<0?1:EVENTS.length-1)) % EVENTS.length;
+      render(); return;
+    }
+    boost();
+  });
+
+  setInterval(()=>{
+    if(S.tick){ S.total = (S.total+1) % 86400; render(); }
+  }, 1000);
+
+  render();
+})();
 </script>

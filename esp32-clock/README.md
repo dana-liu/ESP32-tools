@@ -8,8 +8,22 @@
 
 ## 界面
 
-浏览器打开 [`simulator/ui-preview.html`](simulator/ui-preview.html) 可以看交互预览：
-日常/极简双模式切换、电池供电状态、走时演示。**改界面前先在这里调，不用烧板子。**
+浏览器打开 [`simulator/ui-preview.html`](simulator/ui-preview.html) 可以看交互预览。
+**坐标、颜色、字号全部照抄固件**，改界面前先在这里调，不用烧板子。
+
+能试的：
+
+| 分类 | 可切换 |
+|---|---|
+| 界面 | 日常 / 极简 / 日程列表 / 提醒弹窗 |
+| 来源徽章 | USB / WIFI / LOCAL / DEMO |
+| 电量 | 充电中（绿底白闪电）/ 正常 71% / 低电 12%（陶橙） |
+| 背光 | 夜间调光 12% / 熄屏 |
+| 音量 | 加减 5% + 浮层预览 / 静音 |
+| 手势 | 点屏幕（夜间提亮 30 秒、熄屏点亮）· 长按 0.65 秒切模式 · 左右滑切卡片 |
+
+> 大字时间用 `textLength="196"` 锁死字宽 —— 不锁的话换台机器
+> （Helvetica / 苹方字宽不同）就可能顶出 240 边界。
 
 音量浮层另有 [`simulator/volume-toast-preview.html`](simulator/volume-toast-preview.html)，
 点按钮能看到浮层弹出/消失，也能听到与固件同频的提示音。
