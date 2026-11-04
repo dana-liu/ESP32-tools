@@ -119,6 +119,7 @@ struct DayInfo {
 DayInfo days[MAX_DAYS];
 int dayCount = 0;
 char tempDate[8] = "";     // tempVal 是哪一天的实时温度
+bool weatherStale = false; // 当前天气已不属于今天（离线超出三天缓存），只隐藏不销毁
 char weekText[16] = "";    // 当前日期对应的周几（来自推送，优先于本地推算）
 
 char lunarText[48] = "";
@@ -554,11 +555,12 @@ void drawClockHeader(struct tm* t) {
 
 void drawMainWeather() {
   gfx->setFont(u8g2_font_wqy12_t_gb2312);
-  if (tempVal <= -900) {
+  if (tempVal <= -900 || weatherStale) {
     // 未获得天气时不默认画太阳, 也不显示伪造的温度。
+    // weatherStale = 有数据但已不属于今天（离线超过三天缓存），宁可空着。
     gfx->drawCircle(29, 174, 9, C_LINE);
-    drawFitText("天气暂未同步", 49, 178, 175, C_MUTED);
-    drawFitText("等待天气数据", 49, 195, 175, C_MUTED);
+    drawFitText(weatherStale ? "天气数据已过期" : "天气暂未同步", 49, 178, 175, C_MUTED);
+    drawFitText(weatherStale ? "连接 Mac 后自动更新" : "等待天气数据", 49, 195, 175, C_MUTED);
     return;
   }
   drawWeatherIcon(29, 173, weatherIcon[0] ? weatherIcon : "cloud");
@@ -757,14 +759,19 @@ void applyDayFor(struct tm* t) {
     }
     if (days[i].aqi[0])  copyUtf8(aqiText, sizeof(aqiText), days[i].aqi);
     if (days[i].week[0]) copyUtf8(weekText, sizeof(weekText), days[i].week);
+    weatherStale = false;      // 命中了缓存这一天，天气就是当天/预报的，能用
     return;
   }
-  // 三天缓存里没有这一天（离线超过 3 天）：周几退回本地推算，农历清空，
-  // 都别显示过期的 —— 农历和日期是绑死的，留着就是错的。
+  // 三天缓存里没有这一天（离线超过 3 天）：周几退回本地推算，
+  // 农历清空 —— 这两样按日期绑死，留着过期的就是错的。
   // 注意：dayCount == 0 表示压根没有三天缓存（只推了 LUNAR|），
   // 那种情况下 lunarText 是实时推来的，不能清。
   weekText[0] = 0;
   if (dayCount > 0) lunarText[0] = 0;
+  // 天气同样按日期绑定：今天已经不是 tempDate 那天了，就别再显示那天的天气。
+  // 用标志位而不是清空数据 —— 清空是破坏性的，时钟一拨回来就恢复不了，
+  // 得等下一次推送（最长 5 分钟）才重新出现。
+  weatherStale = tempDate[0] && strcmp(tempDate, key);
 }
 
 // ---------------- 渲染 ----------------
@@ -976,6 +983,7 @@ static void dropDemoData() {
   cityText[0] = 0;
   aqiText[0] = 0;
   lunarText[0] = 0;
+  weatherStale = false;
   forceRender = true;
   DBG("[demo] 演示数据已撤掉\n");
 }
@@ -1128,6 +1136,7 @@ void handleLine(char* s) {
       copyUtf8(weatherIcon, sizeof(weatherIcon), f[2]);
       copyUtf8(cityText,    sizeof(cityText),    f[3]);
       copyUtf8(aqiText,     sizeof(aqiText),     f[4]);
+      weatherStale = false;      // 刚收到的实时天气，一定属于今天
       forceRender = true;
     }
     linkTouch();
@@ -1179,6 +1188,8 @@ void handleLine(char* s) {
       // 串口链路是否在线（顶栏 USB / LOCAL 的依据）+ 距上次收到数据多少毫秒
       Serial.printf("STATE|link|%d|%lu\n", linkOnline ? 1 : 0,
                     (unsigned long)(millis() - lastLinkMs));
+      // 天气是否已过期（超出三天缓存，屏上隐藏但仍保留原值）
+      Serial.printf("STATE|wx|%d|%d|%s\n", tempVal, weatherStale ? 1 : 0, tempDate);
     }
     Serial.println("STATE|ok");
     return;
