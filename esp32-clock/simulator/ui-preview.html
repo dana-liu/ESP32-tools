@@ -75,7 +75,8 @@
       <h2>电量</h2>
       <div class="row">
         <button id="p-chg" aria-pressed="true">充电中 71%</button>
-        <button id="p-ok" aria-pressed="false">正常 71%</button>
+        <button id="p-ok" aria-pressed="false">放电 71%</button>
+        <button id="p-full" aria-pressed="false">已充满 100%</button>
         <button id="p-low" aria-pressed="false">低电 12%</button>
       </div>
 
@@ -136,6 +137,7 @@
     off:false,            // 熄屏
     vol:60, soundOn:true, toastUntil:0,
     cardIndex:0,
+    batFull:false,
     petMood:"idle", petBlink:false, petWag:0, petFed:0, petMoodUntil:0,
     total:11*3600+35*60+27,   // 11:35:27
     tick:false,
@@ -190,9 +192,10 @@
   }
 
   // ---- drawBattery() ----
+  // 三种状态：充电中（绿底闪电）/ 已充满（绿底满格）/ 放电中（灰或陶橙）
   function battery(){
     const bx=200, by=16, bw=20, bh=11;
-    const c = S.charging ? C_GREEN : (S.batPct<=25 ? C_ACCENT : C_MUTED);
+    const c = (S.charging || S.batFull) ? C_GREEN : (S.batPct<=25 ? C_ACCENT : C_MUTED);
     let out = `<rect x="${bx}" y="${by}" width="${bw}" height="${bh}" fill="none" stroke="${c}"/>`
             + `<rect x="${bx+bw}" y="${by+3}" width="2" height="5" fill="${c}"/>`;
     if(S.charging){
@@ -481,9 +484,11 @@
   }
   function setBat(mode){
     S.charging = mode==="chg";
-    S.batPct = mode==="low" ? 12 : 71;
+    S.batFull  = mode==="full";
+    S.batPct = mode==="low" ? 12 : (mode==="full" ? 100 : 71);
     document.getElementById("p-chg").setAttribute("aria-pressed", String(mode==="chg"));
     document.getElementById("p-ok").setAttribute("aria-pressed", String(mode==="ok"));
+    document.getElementById("p-full").setAttribute("aria-pressed", String(mode==="full"));
     document.getElementById("p-low").setAttribute("aria-pressed", String(mode==="low"));
     render();
   }
@@ -526,6 +531,7 @@
     document.getElementById("s-"+v).onclick = ()=>setSrc(v);
   document.getElementById("p-chg").onclick = ()=>setBat("chg");
   document.getElementById("p-ok").onclick  = ()=>setBat("ok");
+  document.getElementById("p-full").onclick= ()=>setBat("full");
   document.getElementById("p-low").onclick = ()=>setBat("low");
 
   document.getElementById("b-night").onclick = e=>{

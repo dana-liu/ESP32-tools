@@ -399,14 +399,17 @@ void wakeScreen() {
 
 int  batPct = -1;             // -1 = 还没读到
 bool batChg = false;
+bool batFull = false;         // 已充满：充电器终止了（CHG_STAT 释放）但电压仍满
 
-// 锂电放电曲线，比线性映射准（3.7V 标称其实还有约 40%）
+// 锂电放电曲线，比线性映射准（3.7V 标称其实还有约 40%）。
+// 4.15V 以上直接算 100%：充电器在 4.2V 截止后电压会回落到 4.15 左右，
+// 这时显示 95% 会让人觉得「怎么充不满」。
 static int lipoPct(float v) {
   static const float tab[10][2] = {
     {4.20f, 100}, {4.10f, 90}, {4.00f, 80}, {3.90f, 70}, {3.80f, 55},
     {3.70f, 40},  {3.60f, 25}, {3.50f, 12}, {3.40f, 5},  {3.30f, 0}
   };
-  if (v >= tab[0][0]) return 100;
+  if (v >= 4.15f) return 100;
   if (v <= tab[9][0]) return 0;
   for (int i = 0; i < 9; i++) {
     if (v >= tab[i + 1][0]) {
@@ -426,10 +429,15 @@ void updateBattery() {
   float v = (mv / 8.0f / 1000.0f) * BAT_DIV;
   int  pct = lipoPct(v);
   bool chg = (digitalRead(PIN_CHG_STAT) == LOW);   // 多数充电 IC：低电平 = 正在充
-  if (batPct >= 0 && (pct != batPct || chg != batChg)) forceRender = true;
+  // 充满判断：充电器已经终止（CHG_STAT 释放），但电压还在满电区。
+  // 锂电池充到 4.2V 后充电 IC 会自动截止，静置电压回落到 4.1~4.15V 属正常，
+  // 这时「没在充电」是对的，界面上要和「拔了线在放电」区分开。
+  bool full = !chg && v >= 4.10f;
+  if (batPct >= 0 && (pct != batPct || chg != batChg || full != batFull)) forceRender = true;
   batPct = pct;
   batChg = chg;
-  DBG("[bat] %.2fV %d%% chg=%d\n", v, pct, chg);
+  batFull = full;
+  DBG("[bat] %.2fV %d%% chg=%d full=%d\n", v, pct, chg, full);
 }
 
 // ---------------- 天气图标 ----------------
@@ -513,8 +521,9 @@ void drawClockSeconds(struct tm* t) {
 void drawBattery() {
   if (batPct < 0) return;
   const int bx = 200, by = 16, bw = 20, bh = 11;
-  uint16_t c = batChg ? C_GREEN
-             : (batPct <= 10 ? C_ACCENT : (batPct <= 25 ? C_ACCENT : C_MUTED));
+  // 三种状态：充电中（绿底闪电）/ 已充满（绿底满格）/ 放电中（灰或陶橙）
+  uint16_t c = (batChg || batFull) ? C_GREEN
+             : (batPct <= 25 ? C_ACCENT : C_MUTED);
   gfx->drawRect(bx, by, bw, bh, c);
   gfx->fillRect(bx + bw, by + 3, 2, 5, c);              // 正极凸头
   if (batChg) {
@@ -1407,8 +1416,8 @@ void handleLine(char* s) {
       Serial.printf("STATE|bl|%d|%02d:%02d|%d|%d\n", blLevel,
                     lt.tm_hour, lt.tm_min, isNightNow() ? 1 : 0,
                     screenOff ? 1 : 0);
-      // 电量：百分比 / 是否充电中
-      Serial.printf("STATE|bat|%d|%d\n", batPct, batChg ? 1 : 0);
+      // 电量：百分比 / 是否充电中 / 是否已充满
+      Serial.printf("STATE|bat|%d|%d|%d\n", batPct, batChg ? 1 : 0, batFull ? 1 : 0);
       // 屏上是不是演示数据（1 = 还没收到真数据）
       Serial.printf("STATE|demo|%d\n", demoData ? 1 : 0);
       // 串口链路是否在线（顶栏 USB / LOCAL 的依据）+ 距上次收到数据多少毫秒
@@ -1445,8 +1454,9 @@ void handleLine(char* s) {
     for (int i = 0; i < 8; i++) { raw += analogReadMilliVolts(PIN_BAT_ADC); delay(2); }
     raw /= 8;
     updateBattery();
-    Serial.printf("BAT|%u|%.2f|%d|%d\n", (unsigned)raw,
-                  (raw / 1000.0f) * BAT_DIV, batPct, batChg ? 1 : 0);
+    Serial.printf("BAT|%u|%.2f|%d|%d|%d\n", (unsigned)raw,
+                  (raw / 1000.0f) * BAT_DIV, batPct, batChg ? 1 : 0,
+                  batFull ? 1 : 0);
     return;
   }
 
