@@ -577,15 +577,14 @@
     if(S.screen === "list"){ setScreen("main"); return; }
 
     if(S.screen === "pet"){
-      // 宠物页：三个按钮 + 点猫本身逗它，点空白返回
+      // 宠物页：三个按钮 + 点猫本身逗它。
+      // 其余位置什么都不做 —— 只能靠「返回」退出，和固件一致。
       if(p.y >= 190){
         if(p.x < 80)      { S.petFed++; petSet("eat", 1600); }
         else if(p.x < 152) petSet("play", 1300);
         else               setScreen("main");
       }else if(p.y >= 96 && p.y <= 162 && p.x >= 80 && p.x <= 160){
         petSet("play", 1300);
-      }else{
-        setScreen("main");
       }
       return;
     }

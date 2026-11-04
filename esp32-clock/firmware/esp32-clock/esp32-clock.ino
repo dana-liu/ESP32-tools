@@ -1619,10 +1619,9 @@ void handleGesture(int16_t dx, int16_t dy, int16_t endX, int16_t endY, unsigned 
       } else if (endY >= PET_PAGE_Y - 10 && endY <= PET_PAGE_Y + 56 &&
                  endX >= PET_PAGE_X - 10 && endX <= PET_PAGE_X + 70) {
         petPlay();                                      // 直接点猫 = 逗它
-      } else {
-        screen = SC_MAIN;
-        forceRender = true;
       }
+      // 其余位置什么都不做：宠物页只能靠「返回」按钮退出，
+      // 免得摸一下空白就跳走，看不到猫。
     }
     return;
   }
