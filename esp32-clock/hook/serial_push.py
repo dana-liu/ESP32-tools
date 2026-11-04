@@ -51,6 +51,10 @@ BRIDGE = os.environ.get("CLOCK_BRIDGE", "http://127.0.0.1:8787").rstrip("/")
 PUSH_INTERVAL = float(os.environ.get("CLOCK_PUSH_INTERVAL", "5"))
 TIME_INTERVAL = float(os.environ.get("CLOCK_TIME_INTERVAL", "60"))
 WEATHER_INTERVAL = float(os.environ.get("CLOCK_WEATHER_INTERVAL", "300"))
+# 心跳：设备 45 秒收不到数据就把顶栏切成 LOCAL。
+# 光靠 60 秒一次的 TIME 不够 —— 会出现「每隔一分钟有半分钟显示 LOCAL」。
+# 15 秒一个 PING，设备回 PONG 并刷新链路时间戳。
+KEEPALIVE_INTERVAL = float(os.environ.get("CLOCK_KEEPALIVE_INTERVAL", "15"))
 
 PORT_PATTERNS = ("/dev/cu.usbmodem*", "/dev/cu.usbserial*", "/dev/cu.wchusbserial*")
 
@@ -372,12 +376,17 @@ def main():
 
     last_time = 0.0
     last_weather = 0.0
+    last_ping = 0.0
     last_state = None
     last_sig = None
     last_wsig = None
     while True:
         try:
             now = time.time()
+            # 心跳：让设备知道 Mac 还在，顶栏才能稳定显示 USB
+            if (now - last_ping) >= KEEPALIVE_INTERVAL:
+                send(fd, "PING")
+                last_ping = now
             need_time = (now - last_time) >= TIME_INTERVAL
             events = fetch_events()
             sig = json.dumps(events, ensure_ascii=False, sort_keys=True) if events is not None else None
@@ -429,6 +438,7 @@ def main():
             last_sig = None
             last_wsig = None
             last_weather = 0.0
+            last_ping = 0.0
 
 
 if __name__ == "__main__":

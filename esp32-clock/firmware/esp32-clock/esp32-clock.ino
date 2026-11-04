@@ -1176,6 +1176,9 @@ void handleLine(char* s) {
       Serial.printf("STATE|bat|%d|%d\n", batPct, batChg ? 1 : 0);
       // 屏上是不是演示数据（1 = 还没收到真数据）
       Serial.printf("STATE|demo|%d\n", demoData ? 1 : 0);
+      // 串口链路是否在线（顶栏 USB / LOCAL 的依据）+ 距上次收到数据多少毫秒
+      Serial.printf("STATE|link|%d|%lu\n", linkOnline ? 1 : 0,
+                    (unsigned long)(millis() - lastLinkMs));
     }
     Serial.println("STATE|ok");
     return;
@@ -1275,7 +1278,9 @@ void linkLoop() {
       s_buf[s_len++] = (char)c;
     }
   }
-  if (linkOnline && millis() - lastLinkMs > 30000) {
+  // 超时要大于 Mac 端的心跳间隔（15 秒），留出容忍丢一两次的余量。
+  // 之前是 30 秒、而对时间隔 60 秒 —— 结果是每隔一分钟有半分钟显示 LOCAL。
+  if (linkOnline && millis() - lastLinkMs > 45000) {
     linkOnline = false;
     forceRender = true;
   }
