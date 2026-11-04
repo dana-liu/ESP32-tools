@@ -558,7 +558,7 @@
     e.currentTarget.setAttribute("aria-pressed", String(S.tick));
   };
 
-  // 屏幕手势：轻点=触摸，长按 0.65s=切模式，左右滑=切卡片
+  // 屏幕手势：轻点 / 长按 0.65s / 左右滑，行为与固件 handleGesture() 一致
   let pressAt = 0, startX = 0;
   function svgPos(e){
     const r = svg.getBoundingClientRect();
@@ -569,10 +569,15 @@
     const held = Date.now() - pressAt;
     const dx = e.clientX - startX;
     const p = svgPos(e);
-    if(held >= 650){ setMode(!S.minimal); return; }
+    if(held >= 650){ setMode(!S.minimal); return; }     // 长按 = 切日常/极简
+
+    // 提醒弹窗：点任意位置 = 知道了
+    if(S.screen === "popup"){ setScreen("main"); return; }
+    // 日程列表：点按返回主屏
+    if(S.screen === "list"){ setScreen("main"); return; }
 
     if(S.screen === "pet"){
-      // 宠物页：三个按钮 + 点猫本身逗它
+      // 宠物页：三个按钮 + 点猫本身逗它，点空白返回
       if(p.y >= 190){
         if(p.x < 80)      { S.petFed++; petSet("eat", 1600); }
         else if(p.x < 152) petSet("play", 1300);
@@ -584,15 +589,20 @@
       }
       return;
     }
-    if(Math.abs(dx) > 30 && S.screen==="main" && EVENTS.length > 1){
+
+    // 主屏：左右滑切卡片
+    if(Math.abs(dx) > 30 && EVENTS.length > 1){
       S.cardIndex = (S.cardIndex + (dx<0?1:EVENTS.length-1)) % EVENTS.length;
       render(); return;
     }
-    // 天气栏最右侧的桌宠 → 宠物页（其余位置仍是原来的行为）
-    if(S.screen === "main" && !S.minimal && p.x >= 188 && p.y >= 156){
-      setScreen("pet"); return;
+    // 主屏轻点：天气栏最右侧的桌宠 → 宠物页；其它位置 → 日程列表
+    if(!S.minimal && p.x >= 188 && p.y >= 156){
+      boost();
+      setScreen("pet");
+      return;
     }
-    boost();
+    boost();            // 触摸先按夜间提亮的规则处理
+    setScreen("list");  // 再进日程列表（和固件一致）
   });
 
   setInterval(()=>{
