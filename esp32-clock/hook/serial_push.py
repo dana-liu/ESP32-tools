@@ -336,24 +336,32 @@ def one_shot(port, line):
 def main():
     check_only = "--check" in sys.argv
     once = "--once" in sys.argv
+    one_shot_cmd = any(f in sys.argv for f in ("--vol", "--snd", "--beep", "--bl"))
 
     port = find_port()
     if not port:
-        print("未找到 USB 串口设备（/dev/cu.usbmodem*）")
-        return 1
+        # 常驻模式（不带任何一次性参数）就等设备插入，而不是报错退出 ——
+        # 这样它可以开机自启，USB 什么时候插上什么时候自动开始同步。
+        if check_only or once or one_shot_cmd:
+            print("未找到 USB 串口设备（/dev/cu.usbmodem*）")
+            return 1
+        print("未找到设备，等它插上…（Ctrl-C 退出）")
+        while not port:
+            time.sleep(2)
+            port = find_port()
     if check_only:
         print("OK %s" % port)
         return 0
 
-    if "--vol" in sys.argv:
-        vol = max(0, min(100, int(sys.argv[sys.argv.index("--vol") + 1])))
-        return one_shot(port, "VOL|%d" % vol)
-    if "--snd" in sys.argv:
-        on = int(sys.argv[sys.argv.index("--snd") + 1]) != 0
-        return one_shot(port, "SND|%d" % (1 if on else 0))
-    if "--beep" in sys.argv:
-        return one_shot(port, "BEEP")
-    if "--bl" in sys.argv:
+    if one_shot_cmd:
+        if "--vol" in sys.argv:
+            vol = max(0, min(100, int(sys.argv[sys.argv.index("--vol") + 1])))
+            return one_shot(port, "VOL|%d" % vol)
+        if "--snd" in sys.argv:
+            on = int(sys.argv[sys.argv.index("--snd") + 1]) != 0
+            return one_shot(port, "SND|%d" % (1 if on else 0))
+        if "--beep" in sys.argv:
+            return one_shot(port, "BEEP")
         v = sys.argv[sys.argv.index("--bl") + 1]
         return one_shot(port, "BL|%s" % v)
 
@@ -401,19 +409,26 @@ def main():
             if state and state != last_state:
                 last_state = state
             time.sleep(PUSH_INTERVAL)
-        except OSError as exc:
-            print("串口断开（%s），2 秒后重连…" % exc)
+        except OSError:
+            # 串口没了（拔线/设备重启）。安静地等它回来，不要每个重试都刷一行。
+            print("串口断开，等待设备重新插入…")
             try:
                 os.close(fd)
             except OSError:
                 pass
-            time.sleep(2)
-            port = find_port()
-            if not port:
-                continue
+            while True:
+                time.sleep(2)
+                port = find_port()
+                if port:
+                    break
             fd = open_port(port)
-            print("已重连 %s" % port)
+            print("已重连 %s，全量补推…" % port)
+            # 清空全部推送状态：重连后第一轮就把 对时/日程/天气/三天 全推一遍。
+            # 设备断电重启过的话缓存是空的，不能等 5 分钟的天气轮询间隔。
             last_time = 0.0
+            last_sig = None
+            last_wsig = None
+            last_weather = 0.0
 
 
 if __name__ == "__main__":
