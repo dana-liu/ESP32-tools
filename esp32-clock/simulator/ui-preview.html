@@ -54,6 +54,14 @@
         <button id="b-minimal" aria-pressed="false">极简模式</button>
         <button id="b-list" aria-pressed="false">日程列表</button>
         <button id="b-popup" aria-pressed="false">提醒弹窗</button>
+        <button id="b-pet" aria-pressed="false">宠物页</button>
+      </div>
+
+      <h2>桌宠</h2>
+      <div class="row">
+        <button id="pet-feed">喂食</button>
+        <button id="pet-play">逗它</button>
+        <button id="pet-sleep" aria-pressed="false">装睡</button>
       </div>
 
       <h2>数据来源徽章</h2>
@@ -128,6 +136,7 @@
     off:false,            // 熄屏
     vol:60, soundOn:true, toastUntil:0,
     cardIndex:0,
+    petMood:"idle", petBlink:false, petWag:0, petFed:0, petMoodUntil:0,
     total:11*3600+35*60+27,   // 11:35:27
     tick:false,
     boostTimer:null, toastTimer:null
@@ -254,6 +263,10 @@
     out += text(49+tw+15, 178, DAYS.text, {fs:13});
     out += text(49, 195, `${DAYS.city} · ${DAYS.aqi}`, {fs:11, fill:C_MUTED});
 
+    // 天气栏最右侧的桌宠（scale 2 → 30×26，贴右边缘）
+    const f = petFaces();
+    out += drawPet(194, 164, 2, f.eyes, f.tail, f.openMouth);
+
     // 日程卡 / 无日程
     if(EVENTS.length){
       const e = EVENTS[S.cardIndex % EVENTS.length];
@@ -336,12 +349,108 @@
     return out;
   }
 
+  // ---- 桌宠（与固件 PET_ROWS 完全一致）----
+  const PET_ROWS = [
+    "  #         #  ",
+    " ###       ### ",
+    " ############# ",
+    "###############",
+    "###############",
+    "###############",
+    "###############",
+    " ############# ",
+    "  ###########  ",
+    "  ###########  ",
+    "  ###########  ",
+    "  ###########  ",
+    "  ##       ##  ",
+  ];
+  const C_PET="#f09680", C_PET_D="#7a362a";
+
+  // eyes: 0 睁 1 闭 2 开心；tail: 0 上 1 下
+  function drawPet(ox, oy, s, eyes, tail, openMouth){
+    let out = "";
+    PET_ROWS.forEach((row,y)=>{
+      for(let x=0; x<row.length; x++){
+        if(row[x]==="#") out += `<rect x="${ox+x*s}" y="${oy+y*s}" width="${s}" height="${s}" fill="${C_PET}"/>`;
+      }
+    });
+    if(eyes===2){
+      [3,9].forEach(x=>{
+        out += `<rect x="${ox+x*s}" y="${oy+5*s}" width="${s}" height="${s}" fill="${C_PET_D}"/>`
+             + `<rect x="${ox+(x+1)*s}" y="${oy+4*s}" width="${s}" height="${s}" fill="${C_PET_D}"/>`
+             + `<rect x="${ox+(x+2)*s}" y="${oy+5*s}" width="${s}" height="${s}" fill="${C_PET_D}"/>`;
+      });
+    }else if(eyes===1){
+      [3,10].forEach(x=>{
+        out += `<rect x="${ox+x*s}" y="${oy+5*s}" width="${s*2}" height="${s}" fill="${C_PET_D}"/>`;
+      });
+    }else{
+      [3,10].forEach(x=>{
+        out += `<rect x="${ox+x*s}" y="${oy+4*s}" width="${s*2}" height="${s*2}" fill="${C_BG}"/>`
+             + `<rect x="${ox+(x+1)*s}" y="${oy+5*s}" width="${s}" height="${s}" fill="${C_PET_D}"/>`;
+      });
+    }
+    if(openMouth){
+      out += `<rect x="${ox+6*s}" y="${oy+7*s}" width="${s*3}" height="${s}" fill="${C_PET_D}"/>`
+           + `<rect x="${ox+7*s}" y="${oy+8*s}" width="${s}" height="${s}" fill="${C_PET_D}"/>`;
+    }else{
+      out += `<rect x="${ox+6*s}" y="${oy+7*s}" width="${s}" height="${s}" fill="${C_PET_D}"/>`
+           + `<rect x="${ox+8*s}" y="${oy+7*s}" width="${s}" height="${s}" fill="${C_PET_D}"/>`
+           + `<rect x="${ox+7*s}" y="${oy+8*s}" width="${s}" height="${s}" fill="${C_PET_D}"/>`;
+    }
+    out += `<rect x="${ox+13*s}" y="${oy+10*s}" width="${s*2}" height="${s}" fill="${C_PET}"/>`
+         + `<rect x="${ox+14*s}" y="${oy+(tail?11:9)*s}" width="${s}" height="${s}" fill="${C_PET}"/>`;
+    return out;
+  }
+
+  // 镜像固件 petFaces()：按心情决定表情
+  function petFaces(){
+    let eyes = S.petBlink ? 1 : 0, tail = S.petWag ? 1 : 0, openMouth = false;
+    if(S.petMood==="happy"){ eyes=2; openMouth=true; }
+    else if(S.petMood==="eat"){ eyes=2; openMouth=true; }
+    else if(S.petMood==="play"){ eyes=2; openMouth=true; tail = Math.floor(Date.now()/120)%2; }
+    else if(S.petMood==="sleep"){ eyes=1; }
+    return {eyes, tail, openMouth};
+  }
+
+  function petBubble(){
+    if(S.petMood==="eat")   return "谢谢！好吃～";
+    if(S.petMood==="play")  return "嘿嘿，再来一次";
+    if(S.petMood==="sleep") return "有点困了，早点休息";
+    return "今天也陪你一起工作";
+  }
+
+  // ---- drawPetPage()：与固件同一套坐标 ----
+  function petPage(t){
+    const hh = String(t.getHours()).padStart(2,"0");
+    const mm = String(t.getMinutes()).padStart(2,"0");
+    const {eyes,tail,openMouth} = petFaces();
+    let out = text(16, 54, `${hh}:${mm}`, {fs:42, weight:500, family:"num"});
+    out += text(224, 28, "11月04日", {fill:C_MUTED, anchor:"end"});
+    out += text(224, 48, "周三", {fill:C_MUTED, anchor:"end"});
+    out += `<line x1="16" y1="62" x2="224" y2="62" stroke="${C_LINE}"/>`;
+    out += `<rect x="16" y="72" width="208" height="32" rx="10" fill="${C_ACCENTL}"/>`;
+    out += text(120, 93, petBubble(), {fill:C_ACCENT, anchor:"middle"});
+    out += drawPet(90, 106, 4, eyes, tail, openMouth);
+    const e = EVENTS[S.cardIndex % EVENTS.length];
+    out += text(120, 180, `下一日程 ${e.time} · ${e.title}`, {fill:C_MUTED, anchor:"middle"});
+    out += `<rect x="16" y="190" width="64" height="36" rx="8" fill="${C_ACCENT}"/>`;
+    out += `<rect x="88" y="190" width="64" height="36" rx="8" fill="${C_CARD}" stroke="${C_LINE}"/>`;
+    out += `<rect x="160" y="190" width="64" height="36" rx="8" fill="${C_CARD}" stroke="${C_LINE}"/>`;
+    out += text(48, 213, "喂食", {fill:C_BG, anchor:"middle"});
+    out += text(120, 213, "逗它", {anchor:"middle"});
+    out += text(192, 213, "返回", {anchor:"middle"});
+    return out;
+  }
+
   function render(){
     const now = new Date(2026, 10, 4);
     now.setSeconds(S.total % 86400);
     const body =
       S.screen==="list"  ? listScreen() :
       S.screen==="popup" ? popupScreen(now) :
+      S.screen==="pet"   ? petPage(now) :
                            mainScreen(now);
     svg.innerHTML = `<rect width="240" height="240" fill="${C_BG}"/>` + body + toast();
 
@@ -361,6 +470,7 @@
     S.screen = scr;
     document.getElementById("b-list").setAttribute("aria-pressed", String(scr==="list"));
     document.getElementById("b-popup").setAttribute("aria-pressed", String(scr==="popup"));
+    document.getElementById("b-pet").setAttribute("aria-pressed", String(scr==="pet"));
     render();
   }
   function setSrc(src){
@@ -396,6 +506,22 @@
   document.getElementById("b-minimal").onclick = ()=>setMode(true);
   document.getElementById("b-list").onclick    = ()=>setScreen(S.screen==="list"?"main":"list");
   document.getElementById("b-popup").onclick   = ()=>setScreen(S.screen==="popup"?"main":"popup");
+  document.getElementById("b-pet").onclick     = ()=>setScreen(S.screen==="pet"?"main":"pet");
+
+  // 桌宠：喂食 / 逗它 / 装睡（镜像固件 petFeed / petPlay / 夜间犯困）
+  function petSet(mood, ms){
+    S.petMood = mood;
+    S.petMoodUntil = ms ? Date.now()+ms : 0;
+    S.petBlink = false;
+    render();
+  }
+  document.getElementById("pet-feed").onclick = ()=>{ S.petFed++; petSet("eat", 1600); };
+  document.getElementById("pet-play").onclick = ()=>petSet("play", 1300);
+  document.getElementById("pet-sleep").onclick = e=>{
+    const on = S.petMood !== "sleep";
+    e.currentTarget.setAttribute("aria-pressed", String(on));
+    petSet(on ? "sleep" : "idle", 0);
+  };
   for(const v of ["USB","WIFI","LOCAL","DEMO"])
     document.getElementById("s-"+v).onclick = ()=>setSrc(v);
   document.getElementById("p-chg").onclick = ()=>setBat("chg");
@@ -434,14 +560,37 @@
 
   // 屏幕手势：轻点=触摸，长按 0.65s=切模式，左右滑=切卡片
   let pressAt = 0, startX = 0;
+  function svgPos(e){
+    const r = svg.getBoundingClientRect();
+    return { x:(e.clientX-r.left)*240/r.width, y:(e.clientY-r.top)*240/r.height };
+  }
   svg.addEventListener("pointerdown", e=>{ pressAt = Date.now(); startX = e.clientX; });
   svg.addEventListener("pointerup", e=>{
     const held = Date.now() - pressAt;
     const dx = e.clientX - startX;
+    const p = svgPos(e);
     if(held >= 650){ setMode(!S.minimal); return; }
+
+    if(S.screen === "pet"){
+      // 宠物页：三个按钮 + 点猫本身逗它
+      if(p.y >= 190){
+        if(p.x < 80)      { S.petFed++; petSet("eat", 1600); }
+        else if(p.x < 152) petSet("play", 1300);
+        else               setScreen("main");
+      }else if(p.y >= 96 && p.y <= 162 && p.x >= 80 && p.x <= 160){
+        petSet("play", 1300);
+      }else{
+        setScreen("main");
+      }
+      return;
+    }
     if(Math.abs(dx) > 30 && S.screen==="main" && EVENTS.length > 1){
       S.cardIndex = (S.cardIndex + (dx<0?1:EVENTS.length-1)) % EVENTS.length;
       render(); return;
+    }
+    // 天气栏最右侧的桌宠 → 宠物页（其余位置仍是原来的行为）
+    if(S.screen === "main" && !S.minimal && p.x >= 188 && p.y >= 156){
+      setScreen("pet"); return;
     }
     boost();
   });
@@ -449,6 +598,27 @@
   setInterval(()=>{
     if(S.tick){ S.total = (S.total+1) % 86400; render(); }
   }, 1000);
+
+  // 桌宠动画：眨眼 / 摆尾 / 心情到期（镜像固件 petTick，200ms 一拍）
+  let nextBlink = 0, blinkUntil = 0, nextWag = 0;
+  setInterval(()=>{
+    const now = Date.now();
+    let changed = false;
+    if(S.petMood!=="idle" && S.petMood!=="sleep" && S.petMoodUntil && now>=S.petMoodUntil){
+      S.petMood = "idle"; changed = true;
+    }
+    if(S.petMood==="sleep"){
+      if(S.petBlink){ S.petBlink=false; changed=true; }
+    }else if(!S.petBlink && now>=nextBlink){
+      S.petBlink = true; blinkUntil = now+150;
+      nextBlink = now + 2400 + (now % 2600);
+      changed = true;
+    }else if(S.petBlink && now>=blinkUntil){
+      S.petBlink = false; changed = true;
+    }
+    if(now>=nextWag){ nextWag = now+520; S.petWag ^= 1; changed = true; }
+    if(changed && (S.screen==="main" || S.screen==="pet")) render();
+  }, 200);
 
   render();
 })();

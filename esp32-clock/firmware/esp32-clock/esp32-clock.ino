@@ -72,6 +72,9 @@ const uint16_t C_ACCENT  = C(153, 60, 29);
 const uint16_t C_ACCENTL = C(250, 236, 231);
 const uint16_t C_ORANGE  = C(216, 90, 48);
 const uint16_t C_GREEN   = C(15, 110, 86);
+// 桌宠：珊瑚色像素猫
+const uint16_t C_PET     = C(240, 150, 128);
+const uint16_t C_PET_D   = C(122, 54, 42);
 
 #define MAX_EVENTS 8
 struct EventItem {
@@ -88,7 +91,7 @@ int cardIndex = 0;
 int listPage  = 0;          // 日程列表当前页
 #define LIST_ROWS 5
 
-enum Screen { SC_MAIN, SC_LIST, SC_POPUP };
+enum Screen { SC_MAIN, SC_LIST, SC_POPUP, SC_PET };
 Screen screen = SC_MAIN;
 int popupIdx = 0;
 
@@ -553,6 +556,166 @@ void drawClockHeader(struct tm* t) {
   if (!minimalMode) gfx->drawFastHLine(16, 40, 208, C_LINE);
 }
 
+// ---------------- 桌宠 ----------------
+// 15×13 的像素猫。'#' 是身体，眼睛/嘴/尾巴单独画（这样眨眼、摆尾不用存多份位图）。
+// 天气栏最右侧一个小的，宠物页一个大的，同一个函数按 scale 缩放。
+static const char* const PET_ROWS[13] = {
+  "  #         #  ",
+  " ###       ### ",
+  " ############# ",
+  "###############",
+  "###############",
+  "###############",
+  "###############",
+  " ############# ",
+  "  ###########  ",
+  "  ###########  ",
+  "  ###########  ",
+  "  ###########  ",
+  "  ##       ##  ",
+};
+#define PET_COLS    15
+#define PET_ROWS_N  13
+
+enum PetMood { PET_IDLE, PET_HAPPY, PET_EAT, PET_PLAY, PET_SLEEP };
+PetMood petMood = PET_IDLE;
+unsigned long petMoodUntil = 0;    // 高兴/吃/玩的结束时刻
+unsigned long petNextBlink = 0;    // 下次眨眼时刻
+unsigned long petBlinkUntil = 0;
+unsigned long petNextWag = 0;      // 下次摆尾时刻
+bool petBlink = false;
+int  petWag = 0;                   // 0 尾巴朝上 / 1 朝下
+int  petFedCount = 0;
+
+// eyes: 0 睁 1 闭 2 开心(^ ^)；tail: 0 上 1 下
+void drawPet(int ox, int oy, int s, uint8_t eyes, uint8_t tail, bool openMouth) {
+  for (int y = 0; y < PET_ROWS_N; y++) {
+    const char* row = PET_ROWS[y];
+    for (int x = 0; x < PET_COLS && row[x]; x++) {
+      if (row[x] == '#') gfx->fillRect(ox + x * s, oy + y * s, s, s, C_PET);
+    }
+  }
+  // 眼睛
+  if (eyes == 2) {                       // ^ ^
+    static const int ex[2] = {3, 9};
+    for (int i = 0; i < 2; i++) {
+      int x = ex[i];
+      gfx->fillRect(ox + x * s,         oy + 5 * s, s, s, C_PET_D);
+      gfx->fillRect(ox + (x + 1) * s,   oy + 4 * s, s, s, C_PET_D);
+      gfx->fillRect(ox + (x + 2) * s,   oy + 5 * s, s, s, C_PET_D);
+    }
+  } else if (eyes == 1) {                // 闭眼：一条横线
+    static const int ex[2] = {3, 10};
+    for (int i = 0; i < 2; i++)
+      gfx->fillRect(ox + ex[i] * s, oy + 5 * s, s * 2, s, C_PET_D);
+  } else {                               // 睁眼：白眼珠 + 偏内的瞳孔
+    static const int ex[2] = {3, 10};
+    for (int i = 0; i < 2; i++) {
+      int x = ex[i];
+      gfx->fillRect(ox + x * s, oy + 4 * s, s * 2, s * 2, C_BG);
+      gfx->fillRect(ox + (x + 1) * s, oy + 5 * s, s, s, C_PET_D);
+    }
+  }
+  // 嘴：微笑三点 / 张嘴一块
+  if (openMouth) {
+    gfx->fillRect(ox + 6 * s, oy + 7 * s, s * 3, s, C_PET_D);
+    gfx->fillRect(ox + 7 * s, oy + 8 * s, s, s, C_PET_D);
+  } else {
+    gfx->fillRect(ox + 6 * s, oy + 7 * s, s, s, C_PET_D);
+    gfx->fillRect(ox + 8 * s, oy + 7 * s, s, s, C_PET_D);
+    gfx->fillRect(ox + 7 * s, oy + 8 * s, s, s, C_PET_D);
+  }
+  // 尾巴：两档摆动
+  gfx->fillRect(ox + 13 * s, oy + 10 * s, s * 2, s, C_PET);
+  gfx->fillRect(ox + 14 * s, oy + (tail ? 11 : 9) * s, s, s, C_PET);
+}
+
+// 当前该用哪套表情
+void petFaces(uint8_t& eyes, uint8_t& tail, bool& openMouth) {
+  openMouth = false;
+  tail = petWag ? 1 : 0;
+  switch (petMood) {
+    case PET_HAPPY: eyes = 2; openMouth = true; break;
+    case PET_EAT:   eyes = 2; openMouth = (millis() / 220) % 2; break;      // 咀嚼
+    case PET_PLAY:  eyes = 2; openMouth = true; tail = (millis() / 120) % 2; break;
+    case PET_SLEEP: eyes = 1; break;
+    default:        eyes = petBlink ? 1 : 0; break;
+  }
+}
+
+// 天气栏最右侧那只（scale 2 → 30×26，贴着右边缘）
+#define PET_STRIP_X 194
+#define PET_STRIP_Y 164
+#define PET_STRIP_S 2
+
+void drawPetStrip() {
+  gfx->fillRect(PET_STRIP_X, PET_STRIP_Y, 30, 28, C_BG);
+  uint8_t eyes, tail; bool openMouth;
+  petFaces(eyes, tail, openMouth);
+  drawPet(PET_STRIP_X, PET_STRIP_Y, PET_STRIP_S, eyes, tail, openMouth);
+}
+
+// 每 200ms 调一次：眨眼、摆尾、心情到期、夜里犯困。返回画面是否需要重绘。
+bool petTick() {
+  unsigned long now = millis();
+  bool changed = false;
+
+  if (petMood != PET_IDLE && petMood != PET_SLEEP && now >= petMoodUntil) {
+    petMood = PET_IDLE;
+    changed = true;
+  }
+  // 20:00~09:00 自动犯困（正在吃/玩/高兴时先不打断）
+  PetMood base = isNightNow() ? PET_SLEEP : PET_IDLE;
+  if ((petMood == PET_IDLE || petMood == PET_SLEEP) && petMood != base) {
+    petMood = base;
+    changed = true;
+  }
+  if (petMood == PET_SLEEP) {
+    if (petBlink) { petBlink = false; changed = true; }
+  } else if (!petBlink && now >= petNextBlink) {
+    petBlink = true;
+    petBlinkUntil = now + 150;
+    petNextBlink = now + 2400 + (now % 2600);      // 2.4~5 秒眨一次
+    changed = true;
+  } else if (petBlink && now >= petBlinkUntil) {
+    petBlink = false;
+    changed = true;
+  }
+  if (now >= petNextWag) {
+    petNextWag = now + 520;
+    petWag ^= 1;
+    changed = true;
+  }
+  return changed;
+}
+
+void petFeed() {
+  petMood = PET_EAT;
+  petMoodUntil = millis() + 1600;
+  petBlink = false;
+  petFedCount++;
+  if (soundOn) audioTick();
+  forceRender = true;
+}
+
+void petPlay() {
+  petMood = PET_PLAY;
+  petMoodUntil = millis() + 1300;
+  petBlink = false;
+  if (soundOn) audioChime();
+  forceRender = true;
+}
+
+// 宠物页气泡文案：按心情挑一句
+const char* petBubble() {
+  if (petMood == PET_EAT)   return "谢谢！好吃～";
+  if (petMood == PET_PLAY)  return "嘿嘿，再来一次";
+  if (petMood == PET_SLEEP) return "有点困了，早点休息";
+  if (eventCount > 0 && events[0].minutesUntil > 0 && events[0].minutesUntil <= 30)
+    return "快到点了，别忘了";
+  return "今天也陪你一起工作";
+}
+
 void drawMainWeather() {
   gfx->setFont(u8g2_font_wqy12_t_gb2312);
   if (tempVal <= -900 || weatherStale) {
@@ -573,9 +736,71 @@ void drawMainWeather() {
   gfx->drawCircle(49 + temperatureWidth + 4, 165, 2, C_TEXT);
   gfx->setFont(u8g2_font_wqy12_t_gb2312);
   int conditionX = 49 + temperatureWidth + 15;
-  drawFitText(weatherText, conditionX, 178, 224 - conditionX, C_TEXT);
+  // 右侧 194~224 留给桌宠，文案到此为止
+  drawFitText(weatherText, conditionX, 178, 190 - conditionX, C_TEXT);
   snprintf(buf, sizeof(buf), "%s%s%s", cityText, cityText[0] && aqiText[0] ? " · " : "", aqiText);
-  drawFitText(buf, 49, 195, 175, C_MUTED);
+  drawFitText(buf, 49, 195, 141, C_MUTED);
+  drawPetStrip();          // 天气栏最右侧的桌宠，点它进宠物页
+}
+
+// ---------------- 宠物页 ----------------
+// 版式照设计稿：左上大字时间 + 右上日期两行 → 气泡 → 大号桌宠 →
+// 下一日程 → 三个按钮（喂食 / 逗它 / 返回）
+#define PET_PAGE_X   90      // 大猫左上角（scale 4 → 60×52）
+#define PET_PAGE_Y   106
+#define PET_PAGE_S   4
+#define PET_BTN_Y    190
+#define PET_BTN_H    36
+
+void drawPetPage(struct tm* t) {
+  gfx->fillScreen(C_BG);
+  char buf[80];
+
+  // 左上：大字时间
+  gfx->setFont(u8g2_font_logisoso42_tn);
+  gfx->setTextColor(C_TEXT);
+  snprintf(buf, sizeof(buf), "%02d:%02d", t->tm_hour, t->tm_min);
+  gfx->setCursor(16, 54);
+  gfx->print(buf);
+
+  // 右上：日期 + 周几，右对齐两行
+  gfx->setFont(u8g2_font_wqy12_t_gb2312);
+  snprintf(buf, sizeof(buf), "%02d月%02d日", t->tm_mon + 1, t->tm_mday);
+  textRight(buf, 224, 28, C_MUTED);
+  textRight(weekText[0] ? weekText : weekCN(t->tm_wday), 224, 48, C_MUTED);
+  gfx->drawFastHLine(16, 62, 208, C_LINE);
+
+  // 气泡
+  gfx->fillRoundRect(16, 72, 208, 32, 10, C_ACCENTL);
+  gfx->setFont(u8g2_font_wqy12_t_gb2312);
+  char fitted[80];
+  fitText(petBubble(), fitted, sizeof(fitted), 190);
+  textCenter(fitted, 93, C_ACCENT);
+
+  // 大号桌宠
+  uint8_t eyes, tail; bool openMouth;
+  petFaces(eyes, tail, openMouth);
+  drawPet(PET_PAGE_X, PET_PAGE_Y, PET_PAGE_S, eyes, tail, openMouth);
+
+  // 下一日程
+  gfx->setFont(u8g2_font_wqy12_t_gb2312);
+  if (eventCount > 0) {
+    snprintf(buf, sizeof(buf), "下一日程 %s · %s", events[0].time, events[0].title);
+  } else {
+    strlcpy(buf, "今天没有日程了", sizeof(buf));
+  }
+  fitText(buf, fitted, sizeof(fitted), 208);
+  textCenter(fitted, 180, C_MUTED);
+
+  // 三个按钮
+  gfx->fillRoundRect(16, PET_BTN_Y, 64, PET_BTN_H, 8, C_ACCENT);
+  gfx->fillRoundRect(88, PET_BTN_Y, 64, PET_BTN_H, 8, C_CARD);
+  gfx->drawRoundRect(88, PET_BTN_Y, 64, PET_BTN_H, 8, C_LINE);
+  gfx->fillRoundRect(160, PET_BTN_Y, 64, PET_BTN_H, 8, C_CARD);
+  gfx->drawRoundRect(160, PET_BTN_Y, 64, PET_BTN_H, 8, C_LINE);
+  textCenterAt("喂食", 48,  PET_BTN_Y + 23, C_BG);
+  textCenterAt("逗它", 120, PET_BTN_Y + 23, C_TEXT);
+  textCenterAt("返回", 192, PET_BTN_Y + 23, C_TEXT);
 }
 
 void drawMain(struct tm* t) {
@@ -794,6 +1019,7 @@ void render(bool full = true) {
   if (full || lastSec < 0 || (screen != SC_MAIN && timeChanged)) {
     if (screen == SC_MAIN)      drawMain(&tm);
     else if (screen == SC_LIST) drawList(&tm);
+    else if (screen == SC_PET)  drawPetPage(&tm);
     else                        drawPopup(&tm);
     gfx->flush();
   } else if (screen == SC_MAIN) {
@@ -1190,6 +1416,9 @@ void handleLine(char* s) {
                     (unsigned long)(millis() - lastLinkMs));
       // 天气是否已过期（超出三天缓存，屏上隐藏但仍保留原值）
       Serial.printf("STATE|wx|%d|%d|%s\n", tempVal, weatherStale ? 1 : 0, tempDate);
+      // 桌宠：心情(0空闲/1高兴/2吃/3玩/4困) / 眨眼 / 尾巴 / 喂食次数
+      Serial.printf("STATE|pet|%d|%d|%d|%d\n", (int)petMood,
+                    petBlink ? 1 : 0, petWag, petFedCount);
     }
     Serial.println("STATE|ok");
     return;
@@ -1218,6 +1447,30 @@ void handleLine(char* s) {
     updateBattery();
     Serial.printf("BAT|%u|%.2f|%d|%d\n", (unsigned)raw,
                   (raw / 1000.0f) * BAT_DIV, batPct, batChg ? 1 : 0);
+    return;
+  }
+
+  // 桌宠调试：PET|open 打开宠物页 / PET|feed 喂食 / PET|play 逗它 / PET|back 返回
+  if (!strncmp(s, "PET|", 4)) {
+    const char* v = s + 4;
+    if (!strcmp(v, "open")) {
+      screen = SC_PET;
+      forceRender = true;
+      Serial.println("OK pet");
+    } else if (!strcmp(v, "feed")) {
+      petFeed();
+      Serial.println("OK feed");
+    } else if (!strcmp(v, "play")) {
+      petPlay();
+      Serial.println("OK play");
+    } else if (!strcmp(v, "back")) {
+      screen = SC_MAIN;
+      forceRender = true;
+      Serial.println("OK back");
+    } else {
+      Serial.printf("OK mood=%d fed=%d\n", (int)petMood, petFedCount);
+    }
+    linkTouch();
     return;
   }
 
@@ -1356,6 +1609,23 @@ void handleGesture(int16_t dx, int16_t dy, int16_t endX, int16_t endY, unsigned 
     }
     return;
   }
+  if (screen == SC_PET) {
+    // 只有按钮和猫本身响应，点空白处等于返回
+    if (abs(dx) < 30 && abs(dy) < 30) {
+      if (endY >= PET_BTN_Y) {
+        if (endX < 80)       petFeed();                 // 喂食
+        else if (endX < 152) petPlay();                 // 逗它
+        else { screen = SC_MAIN; forceRender = true; }  // 返回
+      } else if (endY >= PET_PAGE_Y - 10 && endY <= PET_PAGE_Y + 56 &&
+                 endX >= PET_PAGE_X - 10 && endX <= PET_PAGE_X + 70) {
+        petPlay();                                      // 直接点猫 = 逗它
+      } else {
+        screen = SC_MAIN;
+        forceRender = true;
+      }
+    }
+    return;
+  }
   if (screen == SC_LIST) {
     if (abs(dy) > 30 && abs(dy) > abs(dx)) {
       if (dy < 0) listPage++;          // 上滑下一页
@@ -1374,7 +1644,11 @@ void handleGesture(int16_t dx, int16_t dy, int16_t endX, int16_t endY, unsigned 
     forceRender = true;
   } else if (abs(dx) < 30 && abs(dy) < 30) {
     if (heldMs >= 650) toggleClockMode();
-    else {
+    else if (!minimalMode && endX >= 188 && endY >= 156) {
+      // 天气栏最右侧的桌宠 → 宠物页（极简模式没有天气栏，不响应）
+      screen = SC_PET;
+      forceRender = true;
+    } else {
       listPage = 0;
       screen = SC_LIST;
       forceRender = true;
@@ -1494,6 +1768,25 @@ void loop() {
   if (millis() - lastBatMs > 30000UL) {
     lastBatMs = millis();
     updateBattery();
+  }
+
+  // 桌宠：眨眼 / 摆尾 / 心情。只重绘桌宠那一小块并推一条带，不整屏刷。
+  static unsigned long lastPetMs = 0;
+  if (((screen == SC_MAIN && !minimalMode) || screen == SC_PET) &&
+      millis() - lastPetMs >= 200) {
+    lastPetMs = millis();
+    if (petTick()) {
+      uint8_t eyes, tail; bool openMouth;
+      petFaces(eyes, tail, openMouth);
+      if (screen == SC_PET) {
+        gfx->fillRect(PET_PAGE_X, PET_PAGE_Y, 60, 52, C_BG);
+        drawPet(PET_PAGE_X, PET_PAGE_Y, PET_PAGE_S, eyes, tail, openMouth);
+        gfx->flushBand(PET_PAGE_Y, 52);
+      } else {
+        drawPetStrip();
+        gfx->flushBand(PET_STRIP_Y, 28);
+      }
+    }
   }
 
   time_t t = nowEpoch();
