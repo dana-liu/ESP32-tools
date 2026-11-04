@@ -509,11 +509,12 @@ void drawBattery() {
   gfx->drawRect(bx, by, bw, bh, c);
   gfx->fillRect(bx + bw, by + 3, 2, 5, c);              // 正极凸头
   if (batChg) {
-    // 充电中：暗绿底 + 闪电，比电量条直观
-    gfx->fillRect(bx + 2, by + 2, bw - 4, bh - 4, C(0x10, 0x2A, 0x12));
-    gfx->drawLine(bx + 11, by + 1, bx + 8,  by + 5,  C_TEXT);
-    gfx->drawLine(bx + 8,  by + 5, bx + 11, by + 5,  C_TEXT);
-    gfx->drawLine(bx + 11, by + 5, bx + 8,  by + 10, C_TEXT);
+    // 充电中：实心绿底 + 近白色闪电（两个三角拼成）。
+    // 注意这是暖白主题：C_TEXT 是深灰，画在深色底上等于看不见
+    // （最初从 wb-status 的深色主题抄过来就踩了这个坑），所以闪电必须用 C_BG。
+    gfx->fillRect(bx + 2, by + 2, bw - 4, bh - 4, C_GREEN);
+    gfx->fillTriangle(bx + 11, by + 2, bx + 7,  by + 6, bx + 10, by + 6, C_BG);
+    gfx->fillTriangle(bx + 10, by + 9, bx + 14, by + 5, bx + 11, by + 5, C_BG);
   } else {
     int fillW = (bw - 4) * batPct / 100;
     if (fillW > 0) gfx->fillRect(bx + 2, by + 2, fillW, bh - 4, c);
