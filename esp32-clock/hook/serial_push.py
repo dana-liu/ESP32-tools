@@ -214,7 +214,12 @@ def fit_bytes(text, limit=42):
 
 
 def build_event_lines(events):
-    """把桥接的 JSON 事件转成 EV 行"""
+    """把桥接的 JSON 事件转成 EV 行
+
+    格式：EV|月.日|时:分|剩余分钟|全天|时长分钟|标题
+    时长 = end - start，设备用它判断「会开完了没有」——没有这个，
+    首页卡片会把开完的日程一直挂着显示「已开始」。
+    """
     now = datetime.datetime.now().astimezone()
     lines = []
     for e in events:
@@ -225,6 +230,7 @@ def build_event_lines(events):
         all_day = bool(e.get("all_day"))
         title = (e.get("title") or "(无标题)").replace("|", "／").replace("\n", " ")
         title = fit_bytes(title)
+        duration = 60
         if all_day:
             hhmm, minutes = "全天", 99999
         else:
@@ -232,9 +238,15 @@ def build_event_lines(events):
             try:
                 st = datetime.datetime.fromisoformat(start)
                 minutes = int((st - now).total_seconds() // 60)
+                end = e.get("end")
+                if end:
+                    duration = int((datetime.datetime.fromisoformat(end) - st).total_seconds() // 60)
             except Exception:
                 minutes = 0
-        lines.append("EV|%s|%s|%d|%d|%s" % (date, hhmm, minutes, 1 if all_day else 0, title))
+        if duration <= 0:
+            duration = 60
+        lines.append("EV|%s|%s|%d|%d|%d|%s" %
+                     (date, hhmm, minutes, 1 if all_day else 0, duration, title))
     return lines
 
 

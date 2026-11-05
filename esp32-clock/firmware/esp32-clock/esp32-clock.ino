@@ -83,6 +83,7 @@ struct EventItem {
   char title[48];
   char src[8];      // 钉钉 / 本地 / USB
   int minutesUntil;
+  int durationMin;  // 会议时长（分钟），用来判断「开完了没有」
   bool allDay;
 };
 EventItem events[MAX_EVENTS];
@@ -1067,6 +1068,7 @@ void setEvent(int i, time_t when, const char* title, const char* src, bool allDa
   copyUtf8(events[i].title, sizeof(events[i].title), title);
   strlcpy(events[i].src, src, sizeof(events[i].src));
   events[i].allDay = allDay;
+  events[i].durationMin = 60;      // 演示/本地日程没给结束时间，按 1 小时算
   events[i].minutesUntil = allDay ? 99999 : (int)((when - nowEpoch()) / 60);
 }
 
@@ -1277,10 +1279,10 @@ void handleLine(char* s) {
 
   if (!strncmp(s, "EV|", 3)) {
     char* p = s + 3;
-    char* f[5];
+    char* f[6];
     int nf = 0;
     f[nf++] = p;
-    while (*p && nf < 5) {
+    while (*p && nf < 6) {
       if (*p == '|') { *p = 0; f[nf++] = p + 1; }
       p++;
     }
@@ -1292,7 +1294,16 @@ void handleLine(char* s) {
       strlcpy(e.time, f[1], sizeof(e.time));
       e.minutesUntil = atoi(f[2]);
       e.allDay = atoi(f[3]) != 0;
-      copyUtf8(e.title, sizeof(e.title), f[4]);
+      // 第 6 段是时长（分钟），第 7 段才是标题。
+      // 老版本推送器只发 5 段（标题在 f[4]），这里兼容一下，时长按 60 分钟算。
+      if (nf >= 6) {
+        e.durationMin = atoi(f[4]);
+        copyUtf8(e.title, sizeof(e.title), f[5]);
+      } else {
+        e.durationMin = 60;
+        copyUtf8(e.title, sizeof(e.title), f[4]);
+      }
+      if (e.durationMin <= 0) e.durationMin = 60;
       strlcpy(e.src, "USB", sizeof(e.src));
       eventCount++;
     }
@@ -1768,6 +1779,38 @@ void setup() {
   render();
 }
 
+// 移除已经开完的日程。
+// 时长由推送器按「结束时间 - 开始时间」算好传下来（钉钉的 end 字段）；
+// 拿不到时长时按 60 分钟兜底。没有这个清理，首页卡片会一直挂着
+// 上午/昨天的日程，显示「已开始」永不消失。
+void prunePastEvents(struct tm* t) {
+  char today[8];
+  snprintf(today, sizeof(today), "%02d.%02d", t->tm_mon + 1, t->tm_mday);
+
+  int keep = 0;
+  for (int i = 0; i < eventCount; i++) {
+    int dur = events[i].durationMin > 0 ? events[i].durationMin : 60;
+    bool past = events[i].allDay
+                  ? (strcmp(events[i].date, today) < 0)      // 全天日程：过了那一天就撤
+                  : (events[i].minutesUntil < -dur);         // 开始时间 + 时长都过了
+    if (past) {
+      DBG("[ev] 移除已结束日程 %s %s %s\n", events[i].date, events[i].time, events[i].title);
+      continue;
+    }
+    if (keep != i) events[keep] = events[i];
+    keep++;
+  }
+  if (keep == eventCount) return;
+
+  eventCount = keep;
+  if (cardIndex >= eventCount) cardIndex = 0;
+  // 正在弹的提醒如果正好被清掉了，别把界面卡在提醒页
+  if (screen == SC_POPUP && popupIdx >= eventCount) {
+    screen = SC_MAIN;
+    stopPopupRing();
+  }
+}
+
 void loop() {
   linkLoop();
   applyBrightness();   // 每轮算一次目标亮度（夜间 30 秒提亮到期会自动暗回去）
@@ -1806,9 +1849,11 @@ void loop() {
   static int lastMinute = -1;
   if (tm.tm_min != lastMinute) {
     lastMinute = tm.tm_min;
+    // 允许减到负数：正数是「还有多久」，负数是「已经过了多久」，用来判断该不该移除
     for (int i = 0; i < eventCount; i++) {
-      if (!events[i].allDay && events[i].minutesUntil > 0) events[i].minutesUntil--;
+      if (!events[i].allDay) events[i].minutesUntil--;
     }
+    prunePastEvents(&tm);
     forceRender = true;
   }
 
