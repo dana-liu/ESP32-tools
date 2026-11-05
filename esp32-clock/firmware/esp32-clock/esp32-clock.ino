@@ -1781,8 +1781,11 @@ void setup() {
 
 // 移除已经开完的日程。
 // 时长由推送器按「结束时间 - 开始时间」算好传下来（钉钉的 end 字段）；
-// 拿不到时长时按 60 分钟兜底。没有这个清理，首页卡片会一直挂着
-// 上午/昨天的日程，显示「已开始」永不消失。
+// 拿不到时长时按 60 分钟兜底。
+// 会开完后卡片再保留 20 分钟：让人离开会议室还能看到「刚开完的是什么」，
+// 超过就撤掉 —— 没有这个清理，首页卡片会一直挂着，显示「已开始」永不消失。
+#define EVENT_LINGER_MIN 20
+
 void prunePastEvents(struct tm* t) {
   char today[8];
   snprintf(today, sizeof(today), "%02d.%02d", t->tm_mon + 1, t->tm_mday);
@@ -1792,7 +1795,7 @@ void prunePastEvents(struct tm* t) {
     int dur = events[i].durationMin > 0 ? events[i].durationMin : 60;
     bool past = events[i].allDay
                   ? (strcmp(events[i].date, today) < 0)      // 全天日程：过了那一天就撤
-                  : (events[i].minutesUntil < -dur);         // 开始时间 + 时长都过了
+                  : (events[i].minutesUntil < -(dur + EVENT_LINGER_MIN));
     if (past) {
       DBG("[ev] 移除已结束日程 %s %s %s\n", events[i].date, events[i].time, events[i].title);
       continue;
