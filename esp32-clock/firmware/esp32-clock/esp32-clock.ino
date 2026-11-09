@@ -161,6 +161,34 @@ time_t nowEpoch() {
   return baseEpoch + (millis() - baseMillis) / 1000;
 }
 
+// ---------------- 断电后的状态恢复（NVS）----------------
+// 断电会丢两样东西：时间（ESP32 没有电池备份 RTC）和 demoMode 这个 RAM 变量。
+// 结果就是开机后跳回 2026-11-02 并注入 4 条演示日程，顶栏一直挂 DEMO。
+// 把「曾经同步过」和「上次的时间」存进 NVS，开机恢复，别假装成演示数据。
+bool nvsSynced = false;
+uint32_t nvsEpoch = 0;
+
+void loadPersisted() {
+  Preferences p;
+  if (p.begin("clock", true)) {
+    nvsSynced = p.getBool("synced", false);
+    nvsEpoch  = p.getULong("epoch", 0);
+    p.end();
+  }
+  DBG("[nvs] synced=%d epoch=%lu\n", nvsSynced, (unsigned long)nvsEpoch);
+}
+
+void saveSynced(uint32_t epoch) {
+  Preferences p;
+  if (p.begin("clock", false)) {
+    p.putBool("synced", true);
+    p.putULong("epoch", epoch);
+    p.end();
+  }
+  nvsSynced = true;
+  nvsEpoch = epoch;
+}
+
 // ---------------- 文本工具 ----------------
 void textCenter(const char* s, int yBaseline, uint16_t color) {
   int16_t x1, y1; uint16_t w, h;
@@ -1260,6 +1288,10 @@ void handleLine(char* s) {
       demoMode = false;
       forceRender = true;
       linkTouch();
+      // 存一份到 NVS：每小时最多写一次，别把 Flash 写坏
+      if (!nvsSynced || (uint32_t)epoch - nvsEpoch >= 3600) {
+        saveSynced((uint32_t)epoch);
+      }
       Serial.println("OK");
     }
     return;
@@ -1785,6 +1817,18 @@ void setup() {
     } else {
       demoMode = true;
       Serial.println("\n[wifi] 失败, 回退演示模式");
+    }
+  }
+
+  // 存过同步状态就别进演示模式：否则没接 Mac 时屏幕会假装成演示数据
+  loadPersisted();
+  if (nvsSynced) {
+    demoMode = false;
+    if (nvsEpoch > 1760000000) {
+      struct timeval tv;
+      tv.tv_sec = (time_t)nvsEpoch; tv.tv_usec = 0;
+      settimeofday(&tv, nullptr);
+      Serial.printf("[nvs] 恢复上次时间 %lu\n", (unsigned long)nvsEpoch);
     }
   }
 
