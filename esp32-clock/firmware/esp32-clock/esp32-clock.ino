@@ -367,8 +367,8 @@ void stopPopupRing() { popupBeeps = 0; }
 #define SCREEN_OFF_HOLD_MS  800UL   // 静音键长按多久算「熄屏」
 // 自动熄屏时段：到点直接关屏（比调暗到 12% 省得多）。碰一下点亮 30 秒后自动再熄。
 // 串口 OFF|<开始>|<结束> 可临时改，OFF|off 关闭。
-#define AUTO_OFF_START_H    23
-#define AUTO_OFF_END_H      7
+#define AUTO_OFF_START_H    20
+#define AUTO_OFF_END_H      10
 #define POWER_OFF_HOLD_MS   5000UL  // 长按任意键多久算「关机」
 
 int  autoOffStart = AUTO_OFF_START_H;   // -1 = 关闭自动熄屏
