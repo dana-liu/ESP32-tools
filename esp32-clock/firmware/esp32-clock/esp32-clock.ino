@@ -12,6 +12,7 @@
 #include <Wire.h>
 #include <Preferences.h>
 #include <esp_heap_caps.h>
+#include <esp_sleep.h>          // 关机走深度睡眠
 #include <time.h>
 #include <sys/time.h>
 #include "secrets.h"
@@ -364,6 +365,14 @@ void stopPopupRing() { popupBeeps = 0; }
 #define BL_NIGHT            30      // 夜间亮度（约 12%），嫌暗/嫌亮改这里
 #define BL_BOOST_MS         30000UL // 夜间触碰后恢复正常的时长
 #define SCREEN_OFF_HOLD_MS  800UL   // 静音键长按多久算「熄屏」
+// 自动熄屏时段：到点直接关屏（比调暗到 12% 省得多）。碰一下点亮 30 秒后自动再熄。
+// 串口 OFF|<开始>|<结束> 可临时改，OFF|off 关闭。
+#define AUTO_OFF_START_H    23
+#define AUTO_OFF_END_H      7
+#define POWER_OFF_HOLD_MS   5000UL  // 长按任意键多久算「关机」
+
+int  autoOffStart = AUTO_OFF_START_H;   // -1 = 关闭自动熄屏
+int  autoOffEnd   = AUTO_OFF_END_H;
 
 bool blPwmOk   = false;             // ledcAttach 失败就退回直连全亮
 int  blForce   = -1;                // -1=自动；0..255 由串口 BL| 固定（调试用）
@@ -413,6 +422,44 @@ void wakeScreen() {
     DBG("[bl] 点亮\n");
   }
   boostBacklight();
+}
+
+// 自动熄屏时段判断（支持跨 0 点，比如 23~7）
+bool autoOffActive(struct tm* t) {
+  if (autoOffStart < 0) return false;
+  int h = t->tm_hour;
+  if (autoOffStart <= autoOffEnd)
+    return h >= autoOffStart && h < autoOffEnd;
+  return h >= autoOffStart || h < autoOffEnd;
+}
+
+// 关机 = 深度睡眠。ESP32 没有真正的断电开关，但深睡只耗 ~20µA，
+// 电池能放几个月；按任意键唤醒（唤醒等于重启，开机流程会从 NVS 恢复时间）。
+// 关键：先把唤醒源配好再睡 —— 配不上就取消关机，否则就是「睡死叫不醒」。
+bool powerOff(bool dryRun = false) {
+  const uint64_t mask = (1ULL << KEY_VOL_UP) | (1ULL << KEY_VOL_DOWN) | (1ULL << KEY_MUTE);
+  esp_err_t err = esp_sleep_enable_ext1_wakeup(mask, ESP_EXT1_WAKEUP_ANY_LOW);
+  if (err != ESP_OK) {
+    Serial.printf("[pwr] 唤醒源配置失败 err=%d，取消关机\n", (int)err);
+    return false;
+  }
+  if (dryRun) {                     // 只验证唤醒源，不真睡
+    Serial.printf("[pwr] 唤醒源 OK，mask=0x%llx\n", (unsigned long long)mask);
+    return true;
+  }
+  DBG("[pwr] 关机\n");
+  audioSetVolume(0);
+  gfx->fillScreen(C_BG);
+  gfx->setFont(u8g2_font_wqy16_t_gb2312);
+  textCenter("关机中", 118, C_MUTED);
+  gfx->setFont(u8g2_font_wqy12_t_gb2312);
+  textCenter("按任意键开机", 140, C_LINE);
+  gfx->flush();
+  delay(600);                       // 让人看清提示再黑屏
+  if (blPwmOk) { blLevel = 0; ledcWrite(GFX_BL, 0); }
+  delay(120);
+  esp_deep_sleep_start();           // 不返回
+  return true;
 }
 
 // ---------------- 电池 ----------------
@@ -1483,6 +1530,8 @@ void handleLine(char* s) {
       // 桌宠：心情(0空闲/1高兴/2吃/3玩/4困) / 眨眼 / 尾巴 / 喂食次数
       Serial.printf("STATE|pet|%d|%d|%d|%d\n", (int)petMood,
                     petBlink ? 1 : 0, petWag, petFedCount);
+      // 自动熄屏时段 + 当前是否熄屏
+      Serial.printf("STATE|off|%d|%d|%d\n", autoOffStart, autoOffEnd, screenOff ? 1 : 0);
     }
     Serial.println("STATE|ok");
     return;
@@ -1536,6 +1585,39 @@ void handleLine(char* s) {
     } else {
       Serial.printf("OK mood=%d fed=%d\n", (int)petMood, petFedCount);
     }
+    linkTouch();
+    return;
+  }
+
+  // 自动熄屏调试：OFF|<开始>|<结束> 改时段，OFF|off 关闭，OFF 查当前
+  if (!strncmp(s, "OFF|", 4) || !strcmp(s, "OFF")) {
+    if (s[3] == '|' && !strncmp(s + 4, "off", 3)) {
+      autoOffStart = -1;
+      Serial.println("OK off");
+    } else if (s[3] == '|') {
+      int a = atoi(s + 4);
+      const char* bar = strchr(s + 4, '|');
+      int b = bar ? atoi(bar + 1) : -1;
+      if (a >= 0 && a <= 23 && b >= 0 && b <= 23) {
+        autoOffStart = a; autoOffEnd = b;
+        wakeScreen();                  // 改完先点亮，别把人留在黑屏里
+        Serial.printf("OK %d~%d\n", a, b);
+      } else {
+        Serial.println("ERR 用法 OFF|23|7 或 OFF|off");
+      }
+    } else {
+      Serial.printf("OK %d~%d\n", autoOffStart, autoOffEnd);
+    }
+    linkTouch();
+    return;
+  }
+
+  // 关机（真关：深度睡眠，按任意键唤醒）。PWR|test 只验证唤醒源不真睡。
+  if (!strcmp(s, "PWR|off") || !strcmp(s, "PWR|test")) {
+    bool dry = !strcmp(s, "PWR|test");
+    Serial.printf("OK %s\n", dry ? "test" : "poweroff");
+    delay(50);
+    powerOff(dry);
     linkTouch();
     return;
   }
@@ -1916,6 +1998,14 @@ void loop() {
     forceRender = true;
   }
 
+  // 自动熄屏：到了时段就关屏（比调暗省得多）。碰一下点亮 30 秒，
+  // 提亮期一过又自动熄 —— 和手动熄屏共用同一套唤醒逻辑。
+  if (!screenOff && autoOffActive(&tm) && millis() >= blBoostUntil) {
+    screenOff = true;
+    applyBrightness();
+    DBG("[bl] 自动熄屏\n");
+  }
+
   // 秒级重绘
   if (tm.tm_sec != lastSec || forceRender) {
     bool full = forceRender;
@@ -2023,6 +2113,20 @@ void loop() {
     bool down = digitalRead(KEY_VOL_DOWN) == LOW;
     bool mute = digitalRead(KEY_MUTE)     == LOW;
     bool pressed = (up && !kUp) || (down && !kDown) || (mute && !kMute);
+
+    // 长按任意键 5 秒 = 关机。放在熄屏分支之前 —— 熄屏状态下也要能长按关机。
+    // 不绑定某个具体键：实物上「中间那个」对应哪个 GPIO 没实测过，
+    // 三个键都支持反而不会按错。音量/静音都只在「按下沿」动作，长按没有副作用。
+    static unsigned long holdMs = 0;
+    static int lastMask = 0;
+    int mask = (up ? 1 : 0) | (down ? 2 : 0) | (mute ? 4 : 0);
+    if (mask != lastMask) {
+      lastMask = mask;
+      holdMs = mask ? millis() : 0;
+    }
+    if (mask && holdMs && millis() - holdMs >= POWER_OFF_HOLD_MS) {
+      powerOff();                     // 不返回
+    }
 
     if (screenOff) {
       // 熄屏中：任何按键都只负责点亮，这一次事件不再执行别的动作
