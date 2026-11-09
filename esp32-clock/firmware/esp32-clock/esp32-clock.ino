@@ -397,8 +397,13 @@ void wakeScreen() {
 // 而设备能靠电池独立跑一整夜，说明实际电压必然 ≥3.0V。按 3.0 折算是 3.88V
 // （约 66%，正在充电），与事实吻合。换板子/换批次请用串口 BAT 命令重新核对。
 #define BAT_DIV       3.0f
+// 充电时的内阻压降补偿（伏）。实测：充电中 4.09V 显示 89%，
+// 拔掉后 3.98V 显示 78% —— 差的 0.11V 是充电电流在电池内阻上的压降，
+// 不是电量。查表前扣掉它，插拔时才不会跳 10 多个百分点。
+#define BAT_CHG_OFFSET_V 0.11f
 
 int  batPct = -1;             // -1 = 还没读到
+uint32_t batRawMv = 0;        // 最近一次采样的原始毫伏（调试用）
 bool batChg = false;
 bool batFull = false;         // 已充满：充电器终止了（CHG_STAT 释放）但电压仍满
 
@@ -427,9 +432,15 @@ void updateBattery() {
     mv += analogReadMilliVolts(PIN_BAT_ADC);
     delay(2);
   }
-  float v = (mv / 8.0f / 1000.0f) * BAT_DIV;
-  int  pct = lipoPct(v);
-  bool chg = (digitalRead(PIN_CHG_STAT) == LOW);   // 多数充电 IC：低电平 = 正在充
+  float v = (mv / 8.0f / 1000.0f) * BAT_DIV;      // 电池端电压（充电时含内阻压降）
+  bool chg = (digitalRead(PIN_CHG_STAT) == LOW);  // 多数充电 IC：低电平 = 正在充
+  // 充电时端电压被充电电流抬高，直接查表会虚高 10% 以上：
+  // 实测同一时刻「插着线 4.09V/89%」而「拔掉 3.98V/78%」，差 0.11V。
+  // 这个压降就是 I×内阻，不是电量。查表前先扣掉，插拔时才不会跳 10 多个点。
+  // 经验值：随充电电流变化（CC 阶段大、CV 末尾趋近 0），取实测中间值。
+  float vCell = chg ? (v - BAT_CHG_OFFSET_V) : v;
+  if (vCell < 0) vCell = 0;
+  int  pct = lipoPct(vCell);
   // 充满判断：充电器已经终止（CHG_STAT 释放），但电压还在满电区。
   // 锂电池充到 4.2V 后充电 IC 会自动截止，静置电压回落到 4.1~4.15V 属正常，
   // 这时「没在充电」是对的，界面上要和「拔了线在放电」区分开。
@@ -438,7 +449,8 @@ void updateBattery() {
   batPct = pct;
   batChg = chg;
   batFull = full;
-  DBG("[bat] %.2fV %d%% chg=%d full=%d\n", v, pct, chg, full);
+  batRawMv = mv / 8;
+  DBG("[bat] 端%.2fV 估算%.2fV %d%% chg=%d full=%d\n", v, vCell, pct, chg, full);
 }
 
 // ---------------- 天气图标 ----------------
@@ -1465,9 +1477,10 @@ void handleLine(char* s) {
     for (int i = 0; i < 8; i++) { raw += analogReadMilliVolts(PIN_BAT_ADC); delay(2); }
     raw /= 8;
     updateBattery();
-    Serial.printf("BAT|%u|%.2f|%d|%d|%d\n", (unsigned)raw,
-                  (raw / 1000.0f) * BAT_DIV, batPct, batChg ? 1 : 0,
-                  batFull ? 1 : 0);
+    Serial.printf("BAT|%u|%.2f|%.2f|%d|%d|%d\n", (unsigned)raw,
+                  (raw / 1000.0f) * BAT_DIV,
+                  (raw / 1000.0f) * BAT_DIV - (batChg ? BAT_CHG_OFFSET_V : 0.0f),
+                  batPct, batChg ? 1 : 0, batFull ? 1 : 0);
     return;
   }
 
