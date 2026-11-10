@@ -378,6 +378,7 @@ bool blPwmOk   = false;             // ledcAttach 失败就退回直连全亮
 int  blForce   = -1;                // -1=自动；0..255 由串口 BL| 固定（调试用）
 int  blLevel   = -1;                // 当前输出亮度，变了才写 LEDC
 bool screenOff = false;             // 熄屏中（触摸/任意键点亮）
+bool panelAsleep = false;           // 面板已进睡眠 + CPU 已降频
 unsigned long blBoostUntil = 0;     // 夜间临时提亮的截止时刻
 
 // 20:00 到次日 09:00 之间算夜间。用设备自己的 RTC（USB 对时/NTP/演示时钟都行），
@@ -391,6 +392,22 @@ bool isNightNow() {
 }
 
 void applyBrightness() {
+  // 熄屏时把面板和 CPU 一起降下来。
+  // 实测发现光关背光省不了多少 —— 熄屏一整夜和夜间调暗一整夜耗电几乎一样，
+  // 说明主要耗电是 ESP32 本体 + 面板 + PSRAM 的底噪，不是背光。
+  if (screenOff != panelAsleep) {
+    panelAsleep = screenOff;
+    if (screenOff) {
+      gfx->displayOff();              // 面板进睡眠
+      setCpuFrequencyMhz(80);         // 240 -> 80MHz
+      DBG("[bl] 熄屏：面板+降频\n");
+    } else {
+      setCpuFrequencyMhz(240);
+      gfx->displayOn();
+      forceRender = true;             // 面板断电过，整屏重绘
+      DBG("[bl] 点亮：恢复频率\n");
+    }
+  }
   if (!blPwmOk) return;
   int want;
   if (blForce >= 0) {
