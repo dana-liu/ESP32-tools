@@ -42,6 +42,13 @@
 - **顶栏**：日期周几 · 数据来源徽章 · 电量（电池电压实测，充电时显示闪电）
 - **预览**：`simulator/ui-preview.html`（界面）、`simulator/volume-toast-preview.html`（音量浮层与提示音，可听）
 
+### [esp32-terrarium](./esp32-terrarium) — 掌心生态瓶
+
+240×240 触屏生态瓶，可下雨、晒太阳和养小鱼。屏幕同时显示电量、水位和 Codex 额度。
+
+- **通道**：macOS 通过 BLE 同步额度、查看运行状态和更新应用固件；USB 用于首次烧录和恢复。
+- **离线体验**：本机保存生态瓶进度，脱离电脑时仍可使用触屏互动和电量显示。
+
 ### [esp32-dingtalk-bridge](./esp32-dingtalk-bridge) — 钉钉日历桥接
 
 跑在 Mac 上的 Flask 小服务，把钉钉日程、Open-Meteo 天气、农历精简成 JSON。

@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>掌心生态瓶 · 界面模拟器</title>
+<style>
+* { box-sizing: border-box }
+body { margin: 0; min-height: 100vh; padding: clamp(28px,8vw,104px) 24px; background: radial-gradient(ellipse at 35% 30%, #25342d, #111915 65%); color: #ede9d8; font: 15px/1.7 system-ui,sans-serif }
+main { max-width: 790px; margin: auto }
+h1 { font: 600 clamp(36px,6vw,62px)/1.15 "Songti SC", serif; letter-spacing: -.045em; margin: 0 0 18px }
+.wrap { display: flex; flex-wrap: wrap; align-items: center; gap: clamp(28px,7vw,76px) }
+figure { margin: 0; width: min(100%,400px) }
+.device { position: relative; padding: 13px; border-radius: 29px; background: #181d1a; border: 1px solid #697168; box-shadow: 0 28px 80px #0009, inset 0 0 0 3px #292f2a }
+canvas { display: block; width: 100%; height: auto; border-radius: 18px; touch-action: none; cursor: pointer }
+figcaption { margin-top: 16px; text-align: center; color: #a4ad9d; font: 11px/1.5 ui-monospace,monospace; letter-spacing: .14em }
+section { flex: 1; min-width: min(100%,235px) }
+p { margin: 0 0 22px; color: #b9c3b2 }
+.controls { display: flex; flex-wrap: wrap; gap: 8px }
+button { padding: 7px 13px; border: 1px solid #546457; background: #25352b; color: #eae9d7; border-radius: 5px; cursor: pointer; font: inherit }
+button:hover { background: #3c5142 }
+button:focus-visible { outline: 2px solid #e0cb92; outline-offset: 3px }
+output { display: block; margin-top: 18px; font-size: 13px; color: #c8b887 }
+</style>
+</head>
+<body>
+<main>
+
+<div class="wrap">
+  <figure>
+    <div class="device"><canvas id="screen" width="240" height="240" aria-label="生态瓶模拟屏。点按下雨，长按出太阳"></canvas></div>
+    <figcaption>ESP32-S3 · 240 × 240</figcaption>
+  </figure>
+  <section aria-label="模拟器控制">
+    <h1>掌心生态瓶</h1>
+    <p>点一下下雨，长按出太阳。<br>过一天看看苔藓和水位怎么变。</p>
+    <div class="controls">
+      <button data-action="rain">下雨</button>
+      <button data-action="sun">出太阳</button>
+      <button data-action="day">过一天</button>
+    </div>
+    <output id="status" aria-live="polite"></output>
+  </section>
+</div>
+</main>
+<script>
+const canvas = document.querySelector('#screen');
+const ctx = canvas.getContext('2d');
+const status = document.querySelector('#status');
+const key = 'esp32-terrarium-v1';
+const state = { day: 1, water: 54, growth: 0.35, weather: 'calm' };
+const weather = { calm: '月光', rain: '下雨', sun: '晴天' };
+try {
+  const saved = JSON.parse(localStorage.getItem(key));
+  if (saved && saved.weather in weather && [saved.day, saved.water, saved.growth].every(Number.isFinite)) {
+    Object.assign(state, saved);
+  }
+} catch {}
+const limit = (n, min, max) => Math.max(min, Math.min(max, n));
+const noise = n => ((Math.sin(n * 137.7) * 43758.5453) % 1 + 1) % 1;
+
+function update(action) {
+  if (action === 'day') {
+    state.day++;
+    state.growth = limit(state.growth + (state.water >= 35 && state.water <= 80 ? 0.13 : -0.05), 0.1, 1);
+    state.water = limit(state.water - 9, 0, 100);
+    state.weather = 'calm';
+  } else {
+    state.weather = action;
+    state.water = limit(state.water + (action === 'rain' ? 16 : -12), 0, 100);
+  }
+  try { localStorage.setItem(key, JSON.stringify(state)); } catch {}
+  announce();
+}
+
+function announce() {
+  status.textContent = `第 ${state.day} 天 · ${weather[state.weather]} · 水位 ${state.water}%`;
+}
+
+function fill(color, x, y, w, h) {
+  ctx.fillStyle = color;
+  ctx.fillRect(x, y, w, h);
+}
+
+function oval(color, x, y, rx, ry, tilt = 0) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.ellipse(x, y, rx, ry, tilt, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function label(value, x, y, color, size) {
+  ctx.font = `${size}px system-ui, sans-serif`;
+  ctx.fillStyle = color;
+  ctx.fillText(value, x, y);
+}
+
+function glass() {
+  ctx.beginPath();
+  ctx.moveTo(81, 44);
+  ctx.lineTo(159, 44);
+  ctx.bezierCurveTo(160, 62, 204, 61, 204, 98);
+  ctx.lineTo(204, 161);
+  ctx.quadraticCurveTo(204, 186, 181, 188);
+  ctx.quadraticCurveTo(120, 196, 59, 188);
+  ctx.quadraticCurveTo(36, 186, 36, 161);
+  ctx.lineTo(36, 98);
+  ctx.bezierCurveTo(36, 61, 80, 62, 81, 44);
+  ctx.closePath();
+}
+
+function glow(x, y, radius, color) {
+  const halo = ctx.createRadialGradient(x, y, 0, x, y, radius);
+  halo.addColorStop(0, color);
+  halo.addColorStop(1, '#0000');
+  fill(halo, x - radius, y - radius, radius * 2, radius * 2);
+}
+
+function hill(color, y, height, seed) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(34, 197);
+  for (let x = 34; x <= 207; x += 3) {
+    const ridge = Math.sin(x * .045 + seed) * height + Math.sin(x * .11 + seed) * 3;
+    ctx.lineTo(x, y + ridge);
+  }
+  ctx.lineTo(207, 197);
+  ctx.fill();
+}
+
+function draw(ms) {
+  const t = ms / 1000;
+  const sunny = state.weather === 'sun';
+  const rain = state.weather === 'rain';
+  fill('#0b1514', 0, 0, 240, 240);
+  glow(120, 112, 120, sunny ? '#6f653d' : rain ? '#294e50' : '#304738');
+  oval('#091311', 120, 190, 91, 10);
+  glow(119, 180, 70, '#6e694238');
+
+  ctx.save();
+  glass();
+  ctx.clip();
+  const tint = ctx.createLinearGradient(0, 46, 0, 196);
+  tint.addColorStop(0, sunny ? '#56583a' : rain ? '#193a40' : '#233b34');
+  tint.addColorStop(1, '#10201b');
+  fill(tint, 35, 44, 170, 150);
+  glow(120, 67, sunny ? 112 : 76, sunny ? '#f3c56b96' : rain ? '#72c3ca49' : '#d7ad6770');
+
+  if (!rain) {
+    const x = sunny ? 152 : 144;
+    const y = sunny ? 80 : 83;
+    glow(x, y, 32, '#f7d4835e');
+    oval(sunny ? '#ffe2a1' : '#e7cf92', x, y, sunny ? 12 : 7, sunny ? 12 : 7);
+    if (!sunny) oval('#626247', x + 3, y - 3, 6, 6);
+  }
+
+  hill('#253b32', 137, 12, 2);
+  hill('#345143', 148, 10, 3);
+  hill('#455c3b', 157, 7, 4);
+  hill('#2b372a', 174, 5, 1);
+  const waterline = 191 - state.water * .40;
+  if (state.water > 0) {
+    fill('#5ac6ac26', 36, waterline, 168, 196 - waterline);
+    fill('#83ceab50', 36, waterline, 168, 1);
+    for (let i = 0; i < 9; i++) {
+      const x = 45 + noise(i + 201) * 140;
+      const y = waterline + noise(i + 109) * (191 - waterline);
+      fill('#a2dcb148', x + Math.sin(t * 1.1 + i) * 5, y, 4 + i % 6, 1);
+    }
+  }
+
+  for (let i = 0; i < 66 + state.growth * 75; i++) {
+    const x = 38 + noise(i + 40) * 164;
+    const y = 163 + Math.sin(x * .045 + 4) * 7 + noise(i + 91) * 19;
+    const palette = ['#435b32', '#647c42', '#829954', '#b0ad67'];
+    oval(palette[i % 4], x, y, 1 + noise(i + 19) * 4, 1 + noise(i + 55) * 2);
+  }
+
+  for (const [x, y, height] of [[65, 168, 16], [81, 173, 40], [109, 168, 30], [164, 171, 37], [178, 174, 24]]) {
+    const h = height * (.7 + state.growth * .6);
+    const sway = Math.sin(t * 1.45 + x) * 2.5;
+    ctx.strokeStyle = '#aab779';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.quadraticCurveTo(x + 3, y - h / 2, x + sway, y - h);
+    ctx.stroke();
+    for (let leaf = 1; leaf < 5; leaf++) {
+      const level = leaf / 5;
+      const side = leaf % 2 ? 1 : -1;
+      oval(side > 0 ? '#8ba056' : '#b6bd72', x + side * 4 + sway * level,
+        y - h * level, 3 + (1 - level) * h * .15, 2, side * -.55);
+    }
+  }
+
+  if (state.water > 0) {
+    const swim = t * .85;
+    const fishX = 120 + Math.sin(swim) * 39;
+    const depth = 190 - waterline;
+    const fishY = waterline + depth * (.45 + Math.sin(t * 1.2) * .12);
+    const size = limit(depth / 14, .25, 1);
+    ctx.save();
+    ctx.translate(fishX, fishY);
+    ctx.scale(Math.cos(swim) >= 0 ? size : -size, size);
+    const wag = Math.sin(t * 12) * 2;
+    ctx.fillStyle = '#e89058';
+    ctx.beginPath();
+    ctx.moveTo(-4, 0);
+    ctx.lineTo(-12, -4 + wag);
+    ctx.lineTo(-11, 4 + wag);
+    ctx.closePath();
+    ctx.fill();
+    oval('#ffb565', 0, 0, 7, 3.8);
+    oval('#ffe1a2', 1, 1.3, 4.8, 1.5);
+    oval('#4a3326', 3.8, -1, 0.9, 0.9);
+    ctx.restore();
+  }
+  for (let i = 0; i < (rain ? 38 : 9); i++) {
+    const y = 60 + (noise(i + 810) * 130 + t * (rain ? 105 : 6)) % 130;
+    const x = 38 + noise(i + 700) * 163 + Math.sin(t + i) * (rain ? 1 : 4);
+    if (rain) {
+      fill('#b1dedc82', x, y, 1, 8);
+    } else {
+      glow(x, y, 6, '#ffe5a68a');
+      oval('#f3d996', x, y, 1, 1);
+    }
+  }
+  ctx.restore();
+
+  glass();
+  ctx.strokeStyle = '#adccad95';
+  ctx.lineWidth = 1.3;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(45, 144);
+  ctx.lineTo(45, 99);
+  ctx.quadraticCurveTo(45, 82, 61, 75);
+  ctx.strokeStyle = '#e9ffe05b';
+  ctx.lineWidth = 2;
+  ctx.lineCap = 'round';
+  ctx.stroke();
+  const cork = ctx.createLinearGradient(0, 35, 0, 49);
+  cork.addColorStop(0, '#c4a776');
+  cork.addColorStop(1, '#715a40');
+  fill(cork, 80, 36, 80, 12);
+  oval('#d2b485', 120, 36, 40, 3);
+  for (let i = 0; i < 35; i++) {
+    fill('#634c364a', 81 + noise(i + 45) * 77, 37 + noise(i + 610) * 10, 2, 1);
+  }
+
+  label(`第 ${state.day} 天`, 15, 22, '#d7d5b3', 11);
+  ctx.font = '11px system-ui, sans-serif';
+  const mode = weather[state.weather];
+  label(mode, 225 - ctx.measureText(mode).width, 22, '#d7d5b3', 11);
+  fill('#a8b6a339', 15, 205, 210, 1);
+  label('水位', 15, 223, '#bfcbbc', 11);
+  for (let i = 0; i < 12; i++) {
+    fill(i < Math.round(state.water * .12) ? '#91b39a' : '#33463c', 54 + i * 11, 216, 8, 4);
+  }
+  label(`${state.water}%`, 197, 223, '#d4dec8', 11);
+  requestAnimationFrame(draw);
+}
+
+let press = null;
+canvas.addEventListener('pointerdown', event => {
+  if (event.button !== 0 || press) return;
+  canvas.setPointerCapture(event.pointerId);
+  press = {
+    id: event.pointerId,
+    long: false,
+    timer: setTimeout(() => {
+      press.long = true;
+      update('sun');
+    }, 550)
+  };
+});
+
+function endPress(event) {
+  if (!press || press.id !== event.pointerId) return;
+  clearTimeout(press.timer);
+  const tap = event.type === 'pointerup' && !press.long;
+  press = null;
+  if (tap) update('rain');
+}
+
+canvas.addEventListener('pointerup', endPress);
+canvas.addEventListener('pointercancel', endPress);
+canvas.addEventListener('lostpointercapture', endPress);
+document.querySelectorAll('[data-action]').forEach(button => {
+  button.addEventListener('click', () => update(button.dataset.action));
+});
+announce();
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>
