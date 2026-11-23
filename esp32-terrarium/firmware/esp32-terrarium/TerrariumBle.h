@@ -161,6 +161,10 @@ void tick(uint32_t now) {
       packet.data[packet.size] = 0;
       if (acceptQuota(reinterpret_cast<const char*>(packet.data), now)) {
         Serial.println("BLE QUOTA OK");
+      } else if (acceptClock(reinterpret_cast<const char*>(packet.data))) {
+        Serial.println("BLE TIME OK");
+      } else if (acceptResets(reinterpret_cast<const char*>(packet.data))) {
+        Serial.println("BLE RESET OK");
       }
     }
   }
@@ -169,10 +173,11 @@ void tick(uint32_t now) {
 void publishStatus() {
   if (!logs) return;
   const auto* running = esp_ota_get_running_partition();
-  char value[120];
-  snprintf(value, sizeof(value), "%s | %s | day=%d water=%d weather=%d bat=%d charge=%d quota=%d/%d",
+  char value[180];
+  snprintf(value, sizeof(value), "%s | %s | day=%d water=%d weather=%d bat=%d charge=%d quota=%d/%d clock=%d screen=%s reset=%lld/%lld page=%s",
       running ? running->label : "?", __TIME__, day, water, weather,
-      batteryPercent, charging, quotaRemaining[0], quotaRemaining[1]);
+      batteryPercent, charging, quotaRemaining[0], quotaRemaining[1], clockSynced, screenOff ? "off" : "on",
+      (long long)quotaResets[0], (long long)quotaResets[1], quotaPage ? "codex" : "bottle");
   logs->setValue(value);
 }
 

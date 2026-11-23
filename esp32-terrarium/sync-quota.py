@@ -12,7 +12,7 @@ import time
 import tty
 
 
-async def read_quota(codex):
+async def read_quota(codex, *, include_resets=False):
     process = await asyncio.create_subprocess_exec(
         codex, "app-server", "--listen", "stdio://",
         stdin=asyncio.subprocess.PIPE,
@@ -52,17 +52,20 @@ async def read_quota(codex):
 
     limits = (result.get("rateLimitsByLimitId") or {}).get("codex") or result.get("rateLimits") or {}
     fields = []
+    resets = []
     for name in ("primary", "secondary"):
         window = limits.get(name) or {}
         minutes = window.get("windowDurationMins")
         used = window.get("usedPercent")
+        reset = window.get("resetsAt")
+        resets.append(reset if type(reset) is int and 1704067200 <= reset <= 4102444800 else 0)
         fields.extend((
             minutes if isinstance(minutes, int) and 0 < minutes <= 99999 else 0,
             max(0, min(100, round(100 - used))) if isinstance(used, (int, float)) else -1,
         ))
     if fields[1] == fields[3] == -1:
         raise RuntimeError("当前 Codex 登录未返回额度数据")
-    return fields
+    return (fields, resets) if include_resets else fields
 
 
 def send_quota(port, fields):

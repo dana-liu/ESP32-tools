@@ -10,6 +10,7 @@ from pathlib import Path
 import runpy
 import struct
 import tempfile
+import time
 
 from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError
@@ -50,11 +51,21 @@ async def write(client, characteristic, data):
 
 
 async def sync_once(codex):
-    fields = await read_quota(codex)
+    try:
+        fields, resets = await read_quota(codex, include_resets=True)
+    except (OSError, RuntimeError, TimeoutError, ValueError) as error:
+        quota_error = error
+        fields = None
     with radio_lock(wait=False):
         async with connect() as client:
             await read_text(client, LOG)
+            now = int(time.time())
+            offset = time.localtime(now).tm_gmtoff // 60
+            await write(client, QUOTA, f"TIME {now} {offset}".encode())
+            if fields is None:
+                raise quota_error
             await write(client, QUOTA, ("QUOTA " + " ".join(map(str, fields))).encode())
+            await write(client, QUOTA, f"RESET {resets[0]} {resets[1]}".encode())
             deadline = asyncio.get_running_loop().time() + 5
             expected = f"quota={fields[1]}/{fields[3]}"
             while expected not in await read_text(client, LOG):

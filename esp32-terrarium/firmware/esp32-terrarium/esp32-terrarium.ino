@@ -3,6 +3,8 @@
 #include <Preferences.h>
 #include <driver/gpio.h>
 #include <esp_heap_caps.h>
+#include <sys/time.h>
+#include <time.h>
 
 constexpr uint16_t rgb(uint8_t r, uint8_t g, uint8_t b) {
   return ((r & 248) << 8) | ((g & 252) << 3) | (b >> 3);
@@ -111,7 +113,76 @@ bool acceptQuota(const char* line, uint32_t now) {
   return true;
 }
 
+constexpr int previousButton = 0, screenButton = 5, nextButton = 4, backlightPin = 46;
+constexpr int nightStart = 20 * 60, nightEnd = 9 * 60 + 30;
+constexpr uint32_t nightWakeDuration = 30000;
+bool clockSynced = false, nightMode = false, screenOff = false;
+bool manuallyOff = false, nightWake = false;
+uint32_t nightWokeAt = 0;
+int utcOffsetMinutes = 0;
+
+bool acceptClock(const char* line) {
+  long long timestamp;
+  int offset;
+  char extra;
+  if (sscanf(line, "TIME %lld %d %c", &timestamp, &offset, &extra) != 2 ||
+      timestamp < 1704067200LL || timestamp > 4102444800LL ||
+      offset < -12 * 60 || offset > 14 * 60) return false;
+  const timeval clock = {static_cast<time_t>(timestamp), 0};
+  if (settimeofday(&clock, nullptr) != 0) return false;
+  utcOffsetMinutes = offset;
+  clockSynced = true;
+  return true;
+}
+
+bool quotaPage = false;
+time_t quotaResets[2] = {0, 0};
+
+bool acceptResets(const char* line) {
+  long long first, second;
+  char extra;
+  if (sscanf(line, "RESET %lld %lld %c", &first, &second, &extra) != 2 ||
+      (first != 0 && (first < 1704067200LL || first > 4102444800LL)) ||
+      (second != 0 && (second < 1704067200LL || second > 4102444800LL))) return false;
+  quotaResets[0] = first;
+  quotaResets[1] = second;
+  return true;
+}
+
 #include "TerrariumBle.h"
+
+void updateScreenPower(uint32_t now) {
+  if (clockSynced) {
+    const time_t local = time(nullptr) + utcOffsetMinutes * 60;
+    const int minute = local % 86400 / 60;
+    const bool night = minute >= nightStart || minute < nightEnd;
+    if (night != nightMode) {
+      nightMode = night;
+      nightWake = false;
+      if (!night) manuallyOff = false;
+    }
+  }
+  if (nightWake && now - nightWokeAt >= nightWakeDuration) nightWake = false;
+  const bool updating = TerrariumBle::updateCode || TerrariumBle::target || TerrariumBle::rebootAt;
+  const bool shouldBeOff = !updating && (manuallyOff || (nightMode && !nightWake));
+  if (shouldBeOff == screenOff) return;
+  screenOff = shouldBeOff;
+  if (screenOff) {
+    digitalWrite(backlightPin, LOW);
+    panel.displayOff();
+  } else {
+    panel.displayOn();
+    digitalWrite(backlightPin, HIGH);
+  }
+}
+
+void wakeScreen(uint32_t now) {
+  manuallyOff = false;
+  nightWake = nightMode;
+  nightWokeAt = now;
+  updateScreenPower(now);
+}
+
 
 void readQuota(uint32_t now) {
   static char line[48];
@@ -128,6 +199,8 @@ void readQuota(uint32_t now) {
     line[length] = 0;
     if (!overflow) {
       if (acceptQuota(line, now)) Serial.println("QUOTA OK");
+      else if (acceptClock(line)) Serial.println("TIME OK");
+      else if (acceptResets(line)) Serial.println("RESET OK");
       else if (strcmp(line, "BLE OTA ARM") == 0) {
         TerrariumBle::arm(now);
         if (TerrariumBle::updateCode) {
@@ -379,6 +452,80 @@ void drawFish(uint32_t frameElapsed) {
   }
 }
 
+void drawQuotaPage(uint32_t now) {
+  const auto background = rgb(13, 35, 25);
+  const auto ivory = rgb(220, 235, 211);
+  const auto track = rgb(49, 84, 64);
+  const uint16_t accents[] = {rgb(165, 226, 101), rgb(244, 180, 76)};
+  const char* months[] = {"JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                          "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"};
+  const char* weekdays[] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
+  const time_t localTime = clockSynced ? time(nullptr) + utcOffsetMinutes * 60 : 0;
+  tm local{};
+  if (clockSynced) gmtime_r(&localTime, &local);
+
+  screen.fillScreen(background);
+  screen.setTextColor(ivory);
+  screen.setTextSize(4);
+  screen.setCursor(12, 12);
+  if (clockSynced) screen.printf("%02d:%02d", local.tm_hour, local.tm_min);
+  else screen.print("--:--");
+  screen.setTextSize(2);
+  screen.setCursor(155, 12);
+  if (clockSynced) screen.printf("%s %02d", months[local.tm_mon], local.tm_mday);
+  else screen.print("--- --");
+  screen.setCursor(191, 34);
+  screen.print(clockSynced ? weekdays[local.tm_wday] : "---");
+  screen.drawFastHLine(8, 55, 224, track);
+  screen.setCursor(12, 63);
+  screen.print("CODEX");
+  screen.setTextSize(1);
+  screen.setCursor(201, 68);
+  screen.print("LEFT");
+
+  for (int i = 0; i < 2; ++i) {
+    const int top = 91 + i * 72;
+    const int minutes = quotaMinutes[i];
+    const int remaining = now - quotaUpdated < quotaTimeout ? quotaRemaining[i] : -1;
+    if (i) screen.drawFastHLine(8, top - 5, 224, track);
+    screen.setTextSize(2);
+    screen.setTextColor(ivory);
+    screen.setCursor(12, top + 5);
+    if (minutes > 0 && minutes % 1440 == 0) screen.printf("%dD WINDOW", minutes / 1440);
+    else if (minutes > 0 && minutes % 60 == 0) screen.printf("%dH WINDOW", minutes / 60);
+    else if (minutes > 0) screen.printf("%dM WINDOW", minutes);
+    else screen.print(i == 0 ? "PRIMARY" : "SECONDARY");
+
+    char percent[6];
+    if (remaining >= 0) snprintf(percent, sizeof(percent), "%d%%", remaining);
+    else strcpy(percent, "--");
+    screen.setTextSize(3);
+    screen.setTextColor(accents[i]);
+    screen.setCursor(228 - int(strlen(percent)) * 18, top);
+    screen.print(percent);
+    screen.fillRect(12, top + 26, 216, 7, track);
+    if (remaining > 0) screen.fillRect(12, top + 26, 216 * remaining / 100, 7, accents[i]);
+
+    screen.setTextColor(ivory);
+    screen.setTextSize(2);
+    screen.setCursor(12, top + 43);
+    if (remaining < 0 || !clockSynced || !quotaResets[i]) {
+      screen.print("RESET --");
+    } else {
+      const time_t resetTime = quotaResets[i] + utcOffsetMinutes * 60;
+      tm reset{};
+      gmtime_r(&resetTime, &reset);
+      if (reset.tm_year == local.tm_year && reset.tm_yday == local.tm_yday) {
+        screen.printf("RESET TODAY %02d:%02d", reset.tm_hour, reset.tm_min);
+      } else {
+        screen.printf("RESET %02d/%02d %02d:%02d",
+            reset.tm_mon + 1, reset.tm_mday, reset.tm_hour, reset.tm_min);
+      }
+    }
+  }
+  screen.setTextSize(1);
+}
+
 void render(uint32_t now, uint32_t frameElapsed) {
   const float t = now / 1000.0f;
   if (weather == Rain) {
@@ -395,6 +542,12 @@ void render(uint32_t now, uint32_t frameElapsed) {
       weather = weatherBeforeRain;
       scene();
     }
+  }
+  if (quotaPage) {
+    drawQuotaPage(now);
+    TerrariumBle::drawUpdate();
+    screen.flush();
+    return;
   }
   screen.repaint();
   drawFish(frameElapsed);
@@ -417,33 +570,83 @@ void render(uint32_t now, uint32_t frameElapsed) {
   screen.flush();
 }
 
-bool readFinger(bool& down) {
+bool readFinger(bool& down, int& x, int& y) {
   Wire.beginTransmission(0x15);
   Wire.write(uint8_t(0x02));
-  if (Wire.endTransmission(false) != 0 || Wire.requestFrom(uint8_t(0x15), uint8_t(1)) != 1) {
+  if (Wire.endTransmission(false) != 0 || Wire.requestFrom(uint8_t(0x15), uint8_t(5)) != 5) {
     return false;
   }
   down = (Wire.read() & 0x0f) != 0;
+  const int xHigh = Wire.read();
+  x = ((xHigh & 0x0f) << 8) | Wire.read();
+  const int yHigh = Wire.read();
+  y = ((yHigh & 0x0f) << 8) | Wire.read();
   return true;
 }
 
 void input(uint32_t now) {
-  static bool pressed = false, nextWasDown = false, longPress = false;
+  static bool pressed = false, nextWasDown = false, previousWasDown = false;
+  static bool screenWasDown = false, longPress = false;
   static uint32_t started = 0, buttonStarted = 0;
-  static bool updateArmed = false;
+  static bool updateArmed = false, skipPreviousRelease = false;
+  static int startX = 0, startY = 0, lastX = 0, lastY = 0;
   bool down;
+  int x, y;
   bool changed = false;
-  if (readFinger(down)) {
+  const bool screenDown = digitalRead(screenButton) == LOW;
+  const bool previousDown = digitalRead(previousButton) == LOW;
+  const bool nextDown = digitalRead(nextButton) == LOW;
+  const bool toggleScreen = screenDown && !screenWasDown;
+  screenWasDown = screenDown;
+  if (toggleScreen && !screenOff) {
+    manuallyOff = true;
+    nightWake = false;
+    updateScreenPower(now);
+    longPress = true;
+    nextWasDown = nextDown;
+    previousWasDown = previousDown;
+    skipPreviousRelease = previousDown;
+    updateArmed = true;
+    return;
+  }
+  if (screenOff) {
+    // 唤醒那一次触摸不触发天气，熄屏按键组合也不改天数。
+    if (readFinger(down, x, y)) {
+      const bool touchWake = down && !pressed;
+      pressed = down;
+      if (toggleScreen || touchWake) wakeScreen(now);
+    } else if (toggleScreen) {
+      wakeScreen(now);
+    }
+    longPress = true;
+    nextWasDown = nextDown;
+    previousWasDown = previousDown;
+    skipPreviousRelease = previousDown;
+    updateArmed = true;
+    return;
+  }
+  if (readFinger(down, x, y)) {
     if (down && !pressed) {
       started = now;
+      startX = x;
+      startY = y;
       longPress = false;
     }
-    if (down && !longPress && now - started >= 550) {
+    if (down) {
+      lastX = x;
+      lastY = y;
+    }
+    const int dx = lastX - startX;
+    const int dy = lastY - startY;
+    if (down && !quotaPage && !longPress && abs(dx) < 20 && abs(dy) < 20 && now - started >= 550) {
       weather = Sun;
       water = max(0, water - 12);
       changed = longPress = true;
     }
-    if (!down && pressed && !longPress) {
+    const bool released = !down && pressed && !longPress;
+    if (released && abs(dx) >= 35 && abs(dx) > abs(dy)) {
+      quotaPage = !quotaPage;
+    } else if (released && !quotaPage && abs(dx) < 20 && abs(dy) < 20) {
       if (weather != Rain) {
         weatherBeforeRain = weather;
         for (auto& drop : raindrops) resetRaindrop(drop, true);
@@ -455,7 +658,14 @@ void input(uint32_t now) {
     }
     pressed = down;
   }
-  const bool nextDown = digitalRead(4) == LOW;
+  if (!previousDown && previousWasDown) {
+    if (!skipPreviousRelease && day > 1) {
+      --day;
+      changed = true;
+    }
+    skipPreviousRelease = false;
+  }
+  previousWasDown = previousDown;
   if (nextDown && !nextWasDown) {
     buttonStarted = now;
     updateArmed = false;
@@ -494,9 +704,11 @@ void setup() {
   Serial.setTxBufferSize(1024);
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);
-  pinMode(46, OUTPUT);
-  digitalWrite(46, LOW);
-  pinMode(4, INPUT_PULLUP);
+  pinMode(backlightPin, OUTPUT);
+  digitalWrite(backlightPin, LOW);
+  pinMode(nextButton, INPUT_PULLUP);
+  pinMode(previousButton, INPUT_PULLUP);
+  pinMode(screenButton, INPUT_PULLUP);
   Wire.begin(42, 41);
   Wire.setTimeOut(8);
   pinMode(47, OUTPUT);
@@ -521,7 +733,7 @@ void setup() {
   }
   scene();
   render(0, 0);
-  digitalWrite(46, HIGH);
+  digitalWrite(backlightPin, HIGH);
   TerrariumBle::begin();
   TerrariumBle::publishStatus();
   const esp_partition_t* running = esp_ota_get_running_partition();
@@ -538,6 +750,7 @@ void loop() {
   const uint32_t now = millis();
   readQuota(now);
   TerrariumBle::tick(now);
+  updateScreenPower(now);
   if (now - lastBattery >= 5000) {
     lastBattery = now;
     sampleBattery();
@@ -547,7 +760,7 @@ void loop() {
     input(now);
   }
   if (now - lastFrame >= 42) {
-    render(now, now - lastFrame);
+    if (!screenOff) render(now, min(now - lastFrame, uint32_t(100)));
     lastFrame = now;
   }
   if (now - lastLog >= 3000) {
@@ -555,5 +768,5 @@ void loop() {
     TerrariumBle::publishStatus();
     if (Serial) Serial.printf("TERRARIUM RUN day=%d water=%d\n", day, water);
   }
-  delay(1);
+  delay(screenOff ? 7 : 1);
 }
