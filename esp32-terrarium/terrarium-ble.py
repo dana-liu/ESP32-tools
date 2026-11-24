@@ -17,6 +17,7 @@ from bleak.exc import BleakError
 
 UUID_BASE = "6bdc510{}-b75f-462a-a377-8dcecc0d415d"
 SERVICE, QUOTA, LOG, UPDATE, PROGRESS = (UUID_BASE.format(i) for i in range(5))
+read_gemini = runpy.run_path(str(Path(__file__).with_name("antigravity-quota.py")))["read_gemini"]
 read_quota = runpy.run_path(str(Path(__file__).with_name("sync-quota.py")))["read_quota"]
 
 
@@ -50,7 +51,13 @@ async def write(client, characteristic, data):
         await client.write_gatt_char(characteristic, data, response=True)
 
 
-async def sync_once(codex):
+async def sync_once(codex, gemini_reader, previous):
+    gemini = None
+    if gemini_reader:
+        try:
+            gemini = await read_gemini(gemini_reader, previous)
+        except (OSError, RuntimeError, ValueError) as error:
+            print(f"Gemini 额度未更新：{error}", flush=True)
     try:
         fields, resets = await read_quota(codex, include_resets=True)
     except (OSError, RuntimeError, TimeoutError, ValueError) as error:
@@ -62,22 +69,29 @@ async def sync_once(codex):
             now = int(time.time())
             offset = time.localtime(now).tm_gmtoff // 60
             await write(client, QUOTA, f"TIME {now} {offset}".encode())
+            if gemini:
+                await write(client, QUOTA, ("GEMINI " + " ".join(map(str, gemini))).encode())
             if fields is None:
                 raise quota_error
             await write(client, QUOTA, ("QUOTA " + " ".join(map(str, fields))).encode())
             await write(client, QUOTA, f"RESET {resets[0]} {resets[1]}".encode())
             deadline = asyncio.get_running_loop().time() + 5
             expected = f"quota={fields[1]}/{fields[3]}"
-            while expected not in await read_text(client, LOG):
+            gemini_expected = f"gemini={gemini[0]}/{gemini[1]} greset={gemini[2]}/{gemini[3]}" if gemini else None
+            while True:
+                status = await read_text(client, LOG)
+                if expected in status and (gemini_expected is None or gemini_expected in status):
+                    return
                 if asyncio.get_running_loop().time() >= deadline:
                     raise RuntimeError("ESP32 未确认显示额度")
                 await asyncio.sleep(0.25)
 
 
-async def sync(codex, once):
+async def sync(codex, once, gemini_reader):
+    previous = {}
     while True:
         try:
-            await sync_once(codex)
+            await sync_once(codex, gemini_reader, previous)
             print("ESP32 已确认蓝牙额度同步", flush=True)
             if once:
                 return 0
@@ -142,6 +156,7 @@ async def main():
     sync_parser = sub.add_parser("sync", help="同步 Codex 额度")
     sync_parser.add_argument("--codex", default="codex")
     sync_parser.add_argument("--once", action="store_true")
+    sync_parser.add_argument("--gemini-reader", help="Antigravity macOS 额度读取程序路径")
     status_parser = sub.add_parser("status", help="读取当前运行状态")
     status_parser.add_argument("--watch", action="store_true", help="每两秒输出一条运行日志")
     ota_parser = sub.add_parser("ota", help="无线更新应用固件")
@@ -150,7 +165,7 @@ async def main():
     args = parser.parse_args()
     try:
         if args.command == "sync":
-            return await sync(args.codex, args.once)
+            return await sync(args.codex, args.once, args.gemini_reader)
         if args.command == "status":
             with radio_lock(wait=True):
                 async with connect() as client:

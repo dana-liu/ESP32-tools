@@ -165,6 +165,8 @@ void tick(uint32_t now) {
         Serial.println("BLE TIME OK");
       } else if (acceptResets(reinterpret_cast<const char*>(packet.data))) {
         Serial.println("BLE RESET OK");
+      } else if (acceptGemini(reinterpret_cast<const char*>(packet.data), now)) {
+        Serial.println("BLE GEMINI OK");
       }
     }
   }
@@ -173,11 +175,13 @@ void tick(uint32_t now) {
 void publishStatus() {
   if (!logs) return;
   const auto* running = esp_ota_get_running_partition();
-  char value[180];
-  snprintf(value, sizeof(value), "%s | %s | day=%d water=%d weather=%d bat=%d charge=%d quota=%d/%d clock=%d screen=%s reset=%lld/%lld page=%s",
+  char value[230];
+  const char* pageNames[] = {"bottle", "codex", "gemini"};
+  snprintf(value, sizeof(value), "%s | %s | day=%d water=%d weather=%d bat=%d charge=%d quota=%d/%d clock=%d screen=%s reset=%lld/%lld page=%s gemini=%d/%d greset=%lld/%lld",
       running ? running->label : "?", __TIME__, day, water, weather,
       batteryPercent, charging, quotaRemaining[0], quotaRemaining[1], clockSynced, screenOff ? "off" : "on",
-      (long long)quotaResets[0], (long long)quotaResets[1], quotaPage ? "codex" : "bottle");
+      (long long)quotaResets[0], (long long)quotaResets[1], pageNames[currentPage],
+      geminiRemaining[0], geminiRemaining[1], (long long)geminiResets[0], (long long)geminiResets[1]);
   logs->setValue(value);
 }
 

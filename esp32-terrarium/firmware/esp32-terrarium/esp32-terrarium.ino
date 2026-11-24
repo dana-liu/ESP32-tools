@@ -15,14 +15,14 @@ Arduino_ST7789 panel(&bus, 40, 0, true, 240, 240);
 
 class TerrariumCanvas : public Arduino_Canvas {
 public:
-  TerrariumCanvas() : Arduino_Canvas(240, 240, &panel) {}
+  TerrariumCanvas() : Arduino_Canvas(240, 240, &panel, 0, 0, 2) {}
   bool begin(int32_t speed = GFX_NOT_DEFINED) override {
     _framebuffer = static_cast<uint16_t*>(heap_caps_aligned_alloc(
         16, 240 * 240 * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     return _framebuffer && Arduino_Canvas::begin(speed);
   }
-  uint16_t pixelAt(int x, int y) const { return _framebuffer[y * 240 + x]; }
-  void repaint() { draw16bitRGBBitmap(0, 0, backdrop, 240, 240); }
+  uint16_t pixelAt(int x, int y) const { return _framebuffer[(239 - y) * 240 + (239 - x)]; }
+  void repaint() { memcpy(_framebuffer, backdrop, 240 * 240 * sizeof(uint16_t)); }
   uint16_t* backdrop = nullptr;
   void saveBackdrop() { memcpy(backdrop, _framebuffer, 240 * 240 * sizeof(uint16_t)); }
 };
@@ -135,7 +135,27 @@ bool acceptClock(const char* line) {
   return true;
 }
 
-bool quotaPage = false;
+enum Page { BottlePage, CodexPage, GeminiPage, PageCount };
+Page currentPage = BottlePage;
+uint32_t geminiUpdated = 0;
+int geminiRemaining[2] = {-1, -1};
+time_t geminiResets[2] = {0, 0};
+
+bool acceptGemini(const char* line, uint32_t now) {
+  int five, week;
+  long long fiveReset, weekReset;
+  char extra;
+  if (sscanf(line, "GEMINI %3d %3d %lld %lld %c", &five, &week, &fiveReset, &weekReset, &extra) != 4 ||
+      five < -1 || five > 100 || week < -1 || week > 100 ||
+      (fiveReset && (fiveReset < 1704067200LL || fiveReset > 4102444800LL)) ||
+      (weekReset && (weekReset < 1704067200LL || weekReset > 4102444800LL))) return false;
+  geminiRemaining[0] = five;
+  geminiRemaining[1] = week;
+  geminiResets[0] = fiveReset;
+  geminiResets[1] = weekReset;
+  geminiUpdated = now;
+  return true;
+}
 time_t quotaResets[2] = {0, 0};
 
 bool acceptResets(const char* line) {
@@ -201,6 +221,7 @@ void readQuota(uint32_t now) {
       if (acceptQuota(line, now)) Serial.println("QUOTA OK");
       else if (acceptClock(line)) Serial.println("TIME OK");
       else if (acceptResets(line)) Serial.println("RESET OK");
+      else if (acceptGemini(line, now)) Serial.println("GEMINI OK");
       else if (strcmp(line, "BLE OTA ARM") == 0) {
         TerrariumBle::arm(now);
         if (TerrariumBle::updateCode) {
@@ -453,6 +474,7 @@ void drawFish(uint32_t frameElapsed) {
 }
 
 void drawQuotaPage(uint32_t now) {
+  const bool gemini = currentPage == GeminiPage;
   const auto background = rgb(13, 35, 25);
   const auto ivory = rgb(220, 235, 211);
   const auto track = rgb(49, 84, 64);
@@ -478,15 +500,17 @@ void drawQuotaPage(uint32_t now) {
   screen.print(clockSynced ? weekdays[local.tm_wday] : "---");
   screen.drawFastHLine(8, 55, 224, track);
   screen.setCursor(12, 63);
-  screen.print("CODEX");
+  screen.print(gemini ? "GEMINI" : "CODEX");
   screen.setTextSize(1);
   screen.setCursor(201, 68);
   screen.print("LEFT");
 
   for (int i = 0; i < 2; ++i) {
     const int top = 91 + i * 72;
-    const int minutes = quotaMinutes[i];
-    const int remaining = now - quotaUpdated < quotaTimeout ? quotaRemaining[i] : -1;
+    const int minutes = gemini ? (i == 0 ? 300 : 10080) : quotaMinutes[i];
+    const uint32_t updated = gemini ? geminiUpdated : quotaUpdated;
+    const int remaining = now - updated < quotaTimeout ? (gemini ? geminiRemaining[i] : quotaRemaining[i]) : -1;
+    const time_t resetAt = gemini ? geminiResets[i] : quotaResets[i];
     if (i) screen.drawFastHLine(8, top - 5, 224, track);
     screen.setTextSize(2);
     screen.setTextColor(ivory);
@@ -509,10 +533,10 @@ void drawQuotaPage(uint32_t now) {
     screen.setTextColor(ivory);
     screen.setTextSize(2);
     screen.setCursor(12, top + 43);
-    if (remaining < 0 || !clockSynced || !quotaResets[i]) {
+    if (remaining < 0 || !clockSynced || !resetAt) {
       screen.print("RESET --");
     } else {
-      const time_t resetTime = quotaResets[i] + utcOffsetMinutes * 60;
+      const time_t resetTime = resetAt + utcOffsetMinutes * 60;
       tm reset{};
       gmtime_r(&resetTime, &reset);
       if (reset.tm_year == local.tm_year && reset.tm_yday == local.tm_yday) {
@@ -543,7 +567,7 @@ void render(uint32_t now, uint32_t frameElapsed) {
       scene();
     }
   }
-  if (quotaPage) {
+  if (currentPage != BottlePage) {
     drawQuotaPage(now);
     TerrariumBle::drawUpdate();
     screen.flush();
@@ -578,9 +602,9 @@ bool readFinger(bool& down, int& x, int& y) {
   }
   down = (Wire.read() & 0x0f) != 0;
   const int xHigh = Wire.read();
-  x = ((xHigh & 0x0f) << 8) | Wire.read();
+  x = 239 - (((xHigh & 0x0f) << 8) | Wire.read());
   const int yHigh = Wire.read();
-  y = ((yHigh & 0x0f) << 8) | Wire.read();
+  y = 239 - (((yHigh & 0x0f) << 8) | Wire.read());
   return true;
 }
 
@@ -638,15 +662,15 @@ void input(uint32_t now) {
     }
     const int dx = lastX - startX;
     const int dy = lastY - startY;
-    if (down && !quotaPage && !longPress && abs(dx) < 20 && abs(dy) < 20 && now - started >= 550) {
+    if (down && currentPage == BottlePage && !longPress && abs(dx) < 20 && abs(dy) < 20 && now - started >= 550) {
       weather = Sun;
       water = max(0, water - 12);
       changed = longPress = true;
     }
     const bool released = !down && pressed && !longPress;
     if (released && abs(dx) >= 35 && abs(dx) > abs(dy)) {
-      quotaPage = !quotaPage;
-    } else if (released && !quotaPage && abs(dx) < 20 && abs(dy) < 20) {
+      currentPage = static_cast<Page>((currentPage + (dx < 0 ? 1 : PageCount - 1)) % PageCount);
+    } else if (released && currentPage == BottlePage && abs(dx) < 20 && abs(dy) < 20) {
       if (weather != Rain) {
         weatherBeforeRain = weather;
         for (auto& drop : raindrops) resetRaindrop(drop, true);

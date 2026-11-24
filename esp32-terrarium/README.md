@@ -70,3 +70,17 @@ OTA 只更新应用固件。启动日志、断点调试、修改分区和故障�
 - `firmware/esp32-terrarium/TerrariumBle.h` 加密 BLE 特征、数据接收、状态和备用分区更新。
 - `terrarium-ble.py` Mac 蓝牙同步、状态监看和无线更新。
 - `sync-quota.py` Codex App Server 额度读取与 USB 同步。
+
+## Gemini 额度页
+
+左右滑动可在生态瓶、Codex 和 Gemini 之间切换。Gemini 页显示 Antigravity 的 Gemini Models 5 小时额度和周额度。重置时间根据面板倒计时换算，精度随面板显示而定。
+
+在 Antigravity 打开 Settings → Models → Models & Usage，并保持面板打开。首次使用可能需要在 macOS「隐私与安全性 → 辅助功能」允许同步进程读取该面板。编译读取程序并启动同步：
+
+```bash
+mkdir -p build
+swiftc antigravity-quota.swift -o build/antigravity-quota
+.venv/bin/python terrarium-ble.py sync --gemini-reader ./build/antigravity-quota
+```
+
+面板关闭或暂时不可读时，Gemini 页的上次结果约 150 秒后显示 `--`。如果面板数据未刷新，可点击面板的 Refresh quota and credits data。
