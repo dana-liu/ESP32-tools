@@ -83,4 +83,4 @@ swiftc antigravity-quota.swift -o build/antigravity-quota
 .venv/bin/python terrarium-ble.py sync --gemini-reader ./build/antigravity-quota
 ```
 
-面板关闭或暂时不可读时，Gemini 页的上次结果约 150 秒后显示 `--`。如果面板数据未刷新，可点击面板的 Refresh quota and credits data。
+面板关闭或暂时不可读时，Mac 会继续推送最近一次读到的缓存。已知重置时间的窗口在重置时失效，无重置时间的快照最多保留 24 小时。窗口没有有效数据时显示 `--`。如果面板数据未刷新，可点击面板的 Refresh quota and credits data。
