@@ -16,7 +16,7 @@ test_backlight_logic.py —— 固件背光逻辑的宿主机测试（不需要�
 
 import sys
 
-BL_DAY = 255
+BL_DAY = 198       # blDayPct 78% -> 198/255（跟固件 BL_DAY_DEFAULT_PCT 对齐）
 BL_NIGHT = 30
 
 

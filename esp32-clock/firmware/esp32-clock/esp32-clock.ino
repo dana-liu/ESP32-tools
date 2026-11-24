@@ -13,6 +13,10 @@
 #include <Preferences.h>
 #include <esp_heap_caps.h>
 #include <esp_sleep.h>          // 关机走深度睡眠
+#include <esp_system.h>         // esp_reset_reason()：查上次是怎么重启的
+#include "esp_private/esp_clk.h" // esp_clk_rtc_time()：跨深度睡眠的 RTC 计数器
+#include "driver/gpio.h"         // gpio_hold_en()：深睡时锁住 BAT_EN，否则电池被切断
+#include "driver/rtc_io.h"       // rtc_gpio_pullup_en()：按键脚在深睡里别浮空
 #include <time.h>
 #include <sys/time.h>
 #include "secrets.h"
@@ -161,6 +165,21 @@ time_t nowEpoch() {
   if (t > 1760000000) return t;
   return baseEpoch + (millis() - baseMillis) / 1000;
 }
+
+// ---------------- 深度睡眠期间的走时 ----------------
+// 问题：醒来是一次完整重启，millis() 归零，只能靠 NVS 里存的 epoch 恢复；
+// 而 NVS 每小时才写一次 → 醒来时间最多差 1 小时（实测硬复位后差了 12 分钟）。
+// 解法：睡前把「当时的时间」和「RTC 计数器读数」一起塞进 RTC 内存。
+// RTC 域在深度睡眠期间一直供电，计数器不停 —— 醒来一减就知道睡了多久。
+// RTC_DATA_ATTR 只掉电才丢，所以配一个 magic 防止拿断电前的残值。
+#define RTC_TIME_MAGIC 0x5A17C10CUL
+RTC_DATA_ATTR time_t   rtcEpochAtSleep = 0;
+RTC_DATA_ATTR uint64_t rtcUsAtSleep    = 0;
+RTC_DATA_ATTR uint32_t rtcTimeMagic    = 0;
+// 这块板没有 32.768kHz 晶振，深睡期间 RTC 跑内部 RC，会快/慢几个百分点。
+// 醒着的时候拿 esp_clk_rtc_time() 和 millis()（XTAL 基准）比一次速率，
+// 存进 RTC 内存，醒来按它把「睡过去的秒数」除回去。
+RTC_DATA_ATTR float    rtcRateFix      = 1.0f;
 
 // ---------------- 断电后的状态恢复（NVS）----------------
 // 断电会丢两样东西：时间（ESP32 没有电池备份 RTC）和 demoMode 这个 RAM 变量。
@@ -361,7 +380,7 @@ void stopPopupRing() { popupBeeps = 0; }
 //   2. 长按静音键(GPIO5) 0.8 秒熄屏；熄屏时触摸或按任意键点亮
 #define BL_FREQ             5000    // 背光 PWM 频率
 #define BL_RES              8       // 8bit: 0..255
-#define BL_DAY              255     // 平时全亮
+#define BL_DAY_DEFAULT_PCT  78      // 白天亮度（%）。嫌亮/嫌暗用串口 BL|day|xx 调，会存进 NVS
 #define BL_NIGHT            30      // 夜间亮度（约 12%），嫌暗/嫌亮改这里
 #define BL_BOOST_MS         30000UL // 夜间触碰后恢复正常的时长
 #define SCREEN_OFF_HOLD_MS  800UL   // 静音键长按多久算「熄屏」
@@ -377,9 +396,17 @@ int  autoOffEnd   = AUTO_OFF_END_H;
 bool blPwmOk   = false;             // ledcAttach 失败就退回直连全亮
 int  blForce   = -1;                // -1=自动；0..255 由串口 BL| 固定（调试用）
 int  blLevel   = -1;                // 当前输出亮度，变了才写 LEDC
+int  blDayPct  = BL_DAY_DEFAULT_PCT;// 白天亮度百分比（NVS 持久化）
 bool screenOff = false;             // 熄屏中（触摸/任意键点亮）
 bool panelAsleep = false;           // 面板已进睡眠 + CPU 已降频
+unsigned long screenOffSince = 0;   // 本次熄屏从什么时候开始（判断该不该进深度睡眠）
+bool autoSleep = true;              // 熄屏一段时间后自动深度睡眠（串口 SLEEP|0 可关）
 unsigned long blBoostUntil = 0;     // 夜间临时提亮的截止时刻
+
+// 熄屏后多久进深度睡眠。别太短：夜里碰一下屏幕看时间，不该每次都重启。
+#define AUTO_SLEEP_AFTER_MS  120000UL   // 2 分钟
+// 深度睡眠时同时挂一个定时唤醒，到自动熄屏时段结束时自己醒 ——
+// 否则早上没人按键的话，屏会一直黑着（深度睡眠里没法自己判断「天亮了」）。
 
 // 20:00 到次日 09:00 之间算夜间。用设备自己的 RTC（USB 对时/NTP/演示时钟都行），
 // 不联网也能正确切换。
@@ -398,6 +425,7 @@ void applyBrightness() {
   if (screenOff != panelAsleep) {
     panelAsleep = screenOff;
     if (screenOff) {
+      screenOffSince = millis();      // 记下熄屏起点，供深度睡眠倒计时用
       gfx->displayOff();              // 面板进睡眠
       setCpuFrequencyMhz(80);         // 240 -> 80MHz
       DBG("[bl] 熄屏：面板+降频\n");
@@ -417,7 +445,7 @@ void applyBrightness() {
   } else if (isNightNow() && millis() >= blBoostUntil) {
     want = BL_NIGHT;                // 夜间且 30 秒提亮已过期
   } else {
-    want = BL_DAY;
+    want = blDayPct * 255 / 100;    // 白天亮度（可串口 DAY|xx 调，存 NVS）
   }
   if (want != blLevel) {
     blLevel = want;
@@ -450,15 +478,32 @@ bool autoOffActive(struct tm* t) {
   return h >= autoOffStart || h < autoOffEnd;
 }
 
+// 距离自动熄屏时段结束还有多少秒 —— 深度睡眠就睡这么久，到点自己醒。
+uint32_t secsUntilOffEnd(struct tm* t) {
+  int nowMin = t->tm_hour * 60 + t->tm_min;
+  int endMin = autoOffEnd * 60;
+  int diff = endMin - nowMin;
+  if (diff <= 0) diff += 24 * 60;
+  return (uint32_t)diff * 60;
+}
+
 // 关机 = 深度睡眠。ESP32 没有真正的断电开关，但深睡只耗 ~20µA，
 // 电池能放几个月；按任意键唤醒（唤醒等于重启，开机流程会从 NVS 恢复时间）。
 // 关键：先把唤醒源配好再睡 —— 配不上就取消关机，否则就是「睡死叫不醒」。
-bool powerOff(bool dryRun = false) {
+bool powerOff(bool dryRun = false,
+              const char* title = "关机中",
+              const char* sub   = "按任意键开机",
+              uint32_t timerSec = 0) {
   const uint64_t mask = (1ULL << KEY_VOL_UP) | (1ULL << KEY_VOL_DOWN) | (1ULL << KEY_MUTE);
   esp_err_t err = esp_sleep_enable_ext1_wakeup(mask, ESP_EXT1_WAKEUP_ANY_LOW);
   if (err != ESP_OK) {
     Serial.printf("[pwr] 唤醒源配置失败 err=%d，取消关机\n", (int)err);
     return false;
+  }
+  // 触摸走 I2C 轮询，INT 是 GPIO48（不是 RTC 脚），深度睡眠里唤不醒 —— 只能靠按键。
+  if (timerSec > 0) {
+    esp_sleep_enable_timer_wakeup((uint64_t)timerSec * 1000000ULL);
+    Serial.printf("[pwr] 定时唤醒 %u 秒后\n", (unsigned)timerSec);
   }
   if (dryRun) {                     // 只验证唤醒源，不真睡
     Serial.printf("[pwr] 唤醒源 OK，mask=0x%llx\n", (unsigned long long)mask);
@@ -466,11 +511,34 @@ bool powerOff(bool dryRun = false) {
   }
   DBG("[pwr] 关机\n");
   audioSetVolume(0);
+  // 睡前记下时间和 RTC 计数器，醒来靠这两个值算出「睡了多久」
+  rtcEpochAtSleep = nowEpoch();
+  rtcUsAtSleep    = esp_clk_rtc_time();
+  rtcTimeMagic    = RTC_TIME_MAGIC;
+  // 顺手把时间刷进 NVS：万一真的掉电（拔电池、保护板跳闸），醒来只能靠它，
+  // 写新一点就少差一点 —— 不写的话可能退回几小时前的值。
+  saveSynced((uint32_t)rtcEpochAtSleep);
+  Serial.printf("[rtc] 睡前 %lu，RTC %llu us\n",
+                (unsigned long)rtcEpochAtSleep, (unsigned long long)rtcUsAtSleep);
+
+  // ★ 关键：BAT_EN(GPIO2) 是「电池供电保持」脚，深睡里必须锁住。
+  // 不锁的话，进深睡后数字域掉电、GPIO 复位成低电平 → 电池被切断，
+  // 整块板**真的断电**。表现就是：早上要长按 PWR 才能开机，
+  // 重启原因 poweron 而不是 deepsleep，时间退回 NVS 里几小时前的值。
+  // （插着 USB 时 3.3V 由 USB 供给，所以之前测 PWR|sleep 一直没暴露这个坑。）
+  digitalWrite(BAT_EN, HIGH);
+  gpio_hold_en((gpio_num_t)BAT_EN);
+  gpio_deep_sleep_hold_en();
+  // 按键脚在深睡里没有上拉会浮空，浮到低电平就「自己醒」。
+  // RTC 上拉配在 RTC 域里，深睡期间一直有效。
+  rtc_gpio_pullup_en((gpio_num_t)KEY_VOL_UP);
+  rtc_gpio_pullup_en((gpio_num_t)KEY_VOL_DOWN);
+  rtc_gpio_pullup_en((gpio_num_t)KEY_MUTE);
   gfx->fillScreen(C_BG);
   gfx->setFont(u8g2_font_wqy16_t_gb2312);
-  textCenter("关机中", 118, C_MUTED);
+  textCenter(title, 118, C_MUTED);
   gfx->setFont(u8g2_font_wqy12_t_gb2312);
-  textCenter("按任意键开机", 140, C_LINE);
+  textCenter(sub, 140, C_LINE);
   gfx->flush();
   delay(600);                       // 让人看清提示再黑屏
   if (blPwmOk) { blLevel = 0; ledcWrite(GFX_BL, 0); }
@@ -493,6 +561,14 @@ bool powerOff(bool dryRun = false) {
 // 拔掉后 3.98V 显示 78% —— 差的 0.11V 是充电电流在电池内阻上的压降，
 // 不是电量。查表前扣掉它，插拔时才不会跳 10 多个百分点。
 #define BAT_CHG_OFFSET_V 0.11f
+// 低电保护（只在放电时生效，充电中永不动作）。
+// 背景：实测熄屏/降频对续航几乎没帮助，主控空转就要 ~6%/小时，
+// 电池一路跑到 3.3V 才停 —— 反复这样会伤锂电。
+//   10% 以下：强制熄屏（碰一下仍可亮 30 秒）
+//    5% 以下：直接深度睡眠保命，屏幕提示「插 USB 后按任意键开机」
+#define BAT_LOW_PCT    10
+#define BAT_CRIT_PCT    5
+#define BAT_GUARD_HITS  3       // 连续 3 次采样都低才动作，防单次 ADC 抖动误判
 
 int  batPct = -1;             // -1 = 还没读到
 uint32_t batRawMv = 0;        // 最近一次采样的原始毫伏（调试用）
@@ -543,6 +619,70 @@ void updateBattery() {
   batFull = full;
   batRawMv = mv / 8;
   DBG("[bat] 端%.2fV 估算%.2fV %d%% chg=%d full=%d\n", v, vCell, pct, chg, full);
+}
+
+// ---------------- 低电保护 ----------------
+// 每 30 秒（跟 updateBattery 同节奏）检查一次，连续 3 次都低才动作。
+static uint8_t batLowHits  = 0;
+static uint8_t batCritHits = 0;
+
+void batGuardTick() {
+  // 充电中一律不动 —— 插着线还在保护会让人以为设备坏了
+  if (batChg || batPct < 0) { batLowHits = 0; batCritHits = 0; return; }
+
+  batCritHits = (batPct <= BAT_CRIT_PCT) ? (batCritHits < BAT_GUARD_HITS ? batCritHits + 1 : batCritHits) : 0;
+  batLowHits  = (batPct <= BAT_LOW_PCT)  ? (batLowHits  < BAT_GUARD_HITS ? batLowHits  + 1 : batLowHits)  : 0;
+
+  if (batCritHits >= BAT_GUARD_HITS) {
+    Serial.printf("[bat] %d%% 过低，保护性关机\n", batPct);
+    // 挂 30 分钟定时唤醒：插上 USB 后不用按键也能自己醒来。
+    // 只靠按键的话，低电睡下去、插了线也一直黑着，容易被当成坏了。
+    powerOff(false, "电量过低", "插 USB 后按任意键开机", 1800);
+    return;                          // 唤醒源配不上才会走到这里
+  }
+  // 低电只是强制熄屏，不关机 —— 碰一下还能看 30 秒
+  if (batLowHits >= BAT_GUARD_HITS && !screenOff && millis() >= blBoostUntil) {
+    screenOff = true;
+    applyBrightness();
+    Serial.printf("[bat] %d%% 低电，强制熄屏\n", batPct);
+  }
+}
+
+// 上次是怎么重启的。brownout = 电池被榨到电压不够，能直接证明「没电关机」。
+static const char* resetReasonStr() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:   return "poweron";
+    case ESP_RST_EXT:       return "ext";
+    case ESP_RST_SW:        return "sw";
+    case ESP_RST_PANIC:     return "panic";
+    case ESP_RST_INT_WDT:   return "int_wdt";
+    case ESP_RST_TASK_WDT:  return "task_wdt";
+    case ESP_RST_WDT:       return "wdt";
+    case ESP_RST_BROWNOUT:  return "brownout";
+    case ESP_RST_DEEPSLEEP: return "deepsleep";
+    default:                return "unknown";
+  }
+}
+
+// ---------------- 熄屏后深度睡眠 ----------------
+// 为什么要睡：实测熄屏/关背光/面板睡眠/降频四件事全开，耗电还是 ~6%/小时
+// （见 README「实测耗电速率」）—— 空转的主控本身才是大头。深度睡眠 20µA 能降到 ~0.05%/h。
+//
+// 三个前提，缺一不睡：
+//   1. 真的熄屏了（panelAsleep）
+//   2. 没插 USB（充电中 / 已充满都不睡，否则会打断数据推送）
+//   3. 处在自动熄屏时段（夜间）—— 白天手动熄屏不睡，免得错过提醒
+// 睡的时候挂一个定时唤醒，到自动熄屏时段结束时自己醒，早上不用按键。
+void maybeAutoSleep(struct tm* t) {
+  if (!autoSleep || !panelAsleep) return;
+  if (batChg || batFull) return;              // 插着线，不省这点电
+  if (!autoOffActive(t)) return;              // 只在夜间睡
+  if (millis() - screenOffSince < AUTO_SLEEP_AFTER_MS) return;
+
+  uint32_t sec = secsUntilOffEnd(t);
+  Serial.printf("[slp] 熄屏 %lu 秒，深度睡眠 %u 秒（到 %02d:00 自动醒）\n",
+                (unsigned long)((millis() - screenOffSince) / 1000UL), sec, autoOffEnd);
+  powerOff(false, "休眠中", "按任意键点亮", sec);   // 不返回
 }
 
 // ---------------- 天气图标 ----------------
@@ -1531,10 +1671,10 @@ void handleLine(char* s) {
       char dk[16];
       snprintf(dk, sizeof(dk), "%04d-%02d-%02d", lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday);
       Serial.printf("STATE|local|%s|%s\n", dk, weekCN(lt.tm_wday));
-      // 背光状态：当前级别 / 设备时间 / 是否夜间 / 是否熄屏 —— 调夜间调光用
-      Serial.printf("STATE|bl|%d|%02d:%02d|%d|%d\n", blLevel,
+      // 背光状态：当前级别 / 设备时间 / 是否夜间 / 是否熄屏 / 白天亮度设定%
+      Serial.printf("STATE|bl|%d|%02d:%02d|%d|%d|%d\n", blLevel,
                     lt.tm_hour, lt.tm_min, isNightNow() ? 1 : 0,
-                    screenOff ? 1 : 0);
+                    screenOff ? 1 : 0, blDayPct);
       // 电量：百分比 / 是否充电中 / 是否已充满
       Serial.printf("STATE|bat|%d|%d|%d\n", batPct, batChg ? 1 : 0, batFull ? 1 : 0);
       // 屏上是不是演示数据（1 = 还没收到真数据）
@@ -1547,8 +1687,18 @@ void handleLine(char* s) {
       // 桌宠：心情(0空闲/1高兴/2吃/3玩/4困) / 眨眼 / 尾巴 / 喂食次数
       Serial.printf("STATE|pet|%d|%d|%d|%d\n", (int)petMood,
                     petBlink ? 1 : 0, petWag, petFedCount);
-      // 自动熄屏时段 + 当前是否熄屏
-      Serial.printf("STATE|off|%d|%d|%d\n", autoOffStart, autoOffEnd, screenOff ? 1 : 0);
+      // 自动熄屏时段 + 当前是否熄屏 + 熄屏后是否自动深度睡眠
+      Serial.printf("STATE|off|%d|%d|%d|%d|%lu\n", autoOffStart, autoOffEnd,
+                    screenOff ? 1 : 0, autoSleep ? 1 : 0,
+                    screenOff ? (unsigned long)((millis() - screenOffSince) / 1000UL) : 0UL);
+      // 排障用：开机多久了 / 上次怎么重启的 / WiFi 有没有连上
+      // 「昨晚什么时候关机的」这类问题，看 up 就能反推出重启时刻
+      Serial.printf("STATE|up|%lu|%s|%d\n",
+                    (unsigned long)(millis() / 1000UL), resetReasonStr(),
+                    WiFi.status() == WL_CONNECTED ? 1 : 0);
+      // 深睡走时：速率校准值 / 睡前时间戳是否有效（0 = 上次没睡过或断过电）
+      Serial.printf("STATE|rtc|%.4f|%d\n", (double)rtcRateFix,
+                    (rtcTimeMagic == RTC_TIME_MAGIC && rtcEpochAtSleep > 1760000000) ? 1 : 0);
     }
     Serial.println("STATE|ok");
     return;
@@ -1639,20 +1789,57 @@ void handleLine(char* s) {
     return;
   }
 
-  // 背光调试：BL|<0-100> 固定亮度，BL|auto 恢复自动。
+  // 深度睡眠自测：PWR|sleep|<秒>，到点自己醒。
+  // 用来验证「醒来后时间还准不准」，不用手按键。
+  if (!strncmp(s, "PWR|sleep|", 10)) {
+    int sec = atoi(s + 10);
+    if (sec <= 0) sec = 30;
+    esp_sleep_enable_timer_wakeup((uint64_t)sec * 1000000ULL);
+    Serial.printf("OK sleep %d\n", sec);
+    delay(50);
+    powerOff(false, "深度睡眠自测", "到点自动醒来");
+    linkTouch();
+    return;
+  }
+
+  // 背光：BL|<0-100> 临时固定亮度，BL|auto 恢复自动，BL|day 查白天亮度，
+  // BL|day|<5-100> 改白天亮度并存 NVS（拔电/重烧都不丢）。
   // 白天测夜间调光不用等到 20:00。
+  // 注意：不能叫 DAY| —— 那个前缀已经是「一天的天气/农历」数据协议。
   if (!strncmp(s, "BL|", 3)) {
     const char* v = s + 3;
     if (!strcmp(v, "auto")) {
       blForce = -1;
       Serial.println("OK auto");
+    } else if (!strncmp(v, "day", 3)) {
+      if (v[3] == '|') {
+        int pct = atoi(v + 4);
+        if (pct < 5) pct = 5;         // 防手抖调到全黑
+        if (pct > 100) pct = 100;
+        blDayPct = pct;
+        Preferences p;
+        if (p.begin("clockui", false)) { p.putInt("day", blDayPct); p.end(); }
+      }
+      Serial.printf("OK day %d\n", blDayPct);
     } else {
       int pct = atoi(v);
       blForce = pct <= 0 ? 0 : (pct > 100 ? 255 : pct * 255 / 100);
       Serial.printf("OK %d\n", pct);
     }
-    blBoostUntil = 0;
+    blBoostUntil = 0;                 // 立刻生效，别等 30 秒提亮过期
     applyBrightness();
+    linkTouch();
+    return;
+  }
+
+  // 熄屏后深度睡眠开关：SLEEP|0 关 / SLEEP|1 开 / SLEEP 查询
+  if (!strncmp(s, "SLEEP", 5)) {
+    if (s[5] == '|') {
+      autoSleep = (atoi(s + 6) != 0);
+      Preferences p;
+      if (p.begin("clockui", false)) { p.putBool("sleep", autoSleep); p.end(); }
+    }
+    Serial.printf("OK %d\n", autoSleep ? 1 : 0);
     linkTouch();
     return;
   }
@@ -1834,6 +2021,19 @@ bool loadWifiFromNVS(String& ssid, String& pass) {
 }
 
 void setup() {
+  // 是不是从深度睡眠里醒过来的？醒来自动点亮 30 秒 ——
+  // 否则凌晨按一下键，开机瞬间就被「自动熄屏」判定又关掉，等于白按。
+  esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+  bool wokeFromSleep = (cause == ESP_SLEEP_WAKEUP_EXT1 || cause == ESP_SLEEP_WAKEUP_TIMER);
+
+  // 解开深睡时的引脚锁定。注意顺序：BAT_EN 是「电池供电保持」脚，
+  // 先把它重新配成输出、写高，最后才解 hold —— 否则解除的瞬间引脚会掉到低电平，
+  // 电池直接被切断，插电池时会变成「一开机就断电」的死循环。
+  gpio_deep_sleep_hold_dis();
+  pinMode(BAT_EN, OUTPUT);
+  digitalWrite(BAT_EN, HIGH);
+  gpio_hold_dis((gpio_num_t)BAT_EN);
+
   // USB CDC 的收发队列默认各 256 字节。Mac 一次推送（三天数据 + 天气 + 日程）
   // 大概 400~500 字节，256 装不下会被静默丢弃 —— 表现为「某几条 DAY 没进去」。
   // 必须在 begin() 之前调，begin() 只在队列为空时才用默认值创建。
@@ -1860,6 +2060,10 @@ void setup() {
     minimalMode = ui.getBool("minimal", false);
     volumePct   = ui.getInt("vol", 60);
     soundOn     = ui.getBool("snd", true);
+    blDayPct    = ui.getInt("day", BL_DAY_DEFAULT_PCT);
+    if (blDayPct < 5)  blDayPct = 5;      // 防手抖写坏 NVS 导致黑屏
+    if (blDayPct > 100) blDayPct = 100;
+    autoSleep   = ui.getBool("sleep", true);
     ui.end();
   }
   Wire.begin(TP_SDA, TP_SCL);       // 触摸 / ES8311 / IMU 共用这条 I2C
@@ -1883,6 +2087,9 @@ void setup() {
   tm.tm_hour = 19; tm.tm_min = 3; tm.tm_wday = 1;
   baseEpoch = mktime(&tm);
   baseMillis = millis();
+  // 从深度睡眠醒来的：先给 30 秒提亮，别让开机瞬间又被自动熄屏关掉。
+  // 必须在 applyBrightness() 之前设，否则这一轮就已经判成「该熄」了。
+  if (wokeFromSleep) blBoostUntil = millis() + BL_BOOST_MS;
   // 必须在 baseEpoch 就位之后：nowEpoch() = baseEpoch + 走时，
   // baseEpoch 还是 0 的时候算出来是 1970 年早上 8 点，会被误判成夜间，
   // 背光带着错误亮度熬过整个 WiFi/NTP 连接窗口（最长 25 秒）才被 loop 纠正。
@@ -1894,7 +2101,11 @@ void setup() {
   }
   demoMode = ssid.isEmpty();
 
-  if (!demoMode) {
+  // 从深度睡眠醒来就别连 WiFi 了：电池供电连了也没数据源（桥接在 Mac 上，
+  // 走 USB），白白阻塞 15 秒才出画面 —— 按一下键等 15 秒是不能接受的。
+  if (wokeFromSleep) {
+    Serial.println("[wifi] 深度睡眠唤醒，跳过连接");
+  } else if (!demoMode) {
     WiFi.mode(WIFI_STA);
     WiFi.begin(ssid.c_str(), pass.c_str());
     Serial.print("[wifi] 连接中");
@@ -1929,6 +2140,29 @@ void setup() {
       settimeofday(&tv, nullptr);
       Serial.printf("[nvs] 恢复上次时间 %lu\n", (unsigned long)nvsEpoch);
     }
+  }
+
+  // 从深度睡眠醒来：用 RTC 计数器把「睡过去的那段」补回来。
+  // 必须在 NVS 恢复之后 —— 这里算出来的比 NVS 精确得多，覆盖它。
+  // 只有 ext1（按键）/ timer（定时）唤醒才认，软件复位/烧录后 RTC 内存里的残值不可信。
+  bool sleptWake = (cause == ESP_SLEEP_WAKEUP_EXT1 || cause == ESP_SLEEP_WAKEUP_TIMER);
+  bool canFix    = (rtcTimeMagic == RTC_TIME_MAGIC && rtcEpochAtSleep > 1760000000);
+  if (sleptWake && canFix) {
+    // 内部 RC 会快/慢几个百分点，睡一整夜就是几十分钟 —— 按实测速率除回去。
+    float fix = rtcRateFix;
+    if (fix < 0.95f || fix > 1.05f) fix = 1.0f;      // 掉过电的话残值不可信
+    uint64_t elapsedUs = esp_clk_rtc_time() - rtcUsAtSleep;
+    time_t slept = (time_t)((double)elapsedUs / 1000000.0 / (double)fix);
+    struct timeval tv;
+    tv.tv_sec  = rtcEpochAtSleep + slept;
+    tv.tv_usec = 0;
+    settimeofday(&tv, nullptr);
+    saveSynced((uint32_t)tv.tv_sec);   // 顺手刷新 NVS，下次真断电不至于回太旧
+    Serial.printf("[rtc] 睡了 %ld 秒（速率校准 %.4f），时间已补正\n",
+                  (long)slept, (double)fix);
+  } else if (sleptWake) {
+    // 睡前时间戳无效 = 这一觉之前真的断过电（BAT_EN 没锁住那会儿就是这样）
+    Serial.println("[rtc] 没有有效的睡前时间戳，只能退回 NVS 时间（会偏）");
   }
 
   if (eventCount == 0 && demoMode) { initDemoEvents(); demoData = true; }
@@ -1978,6 +2212,23 @@ void loop() {
   if (millis() - lastBatMs > 30000UL) {
     lastBatMs = millis();
     updateBattery();
+    batGuardTick();
+  }
+
+  // RTC 慢时钟速率校准：拿 esp_clk_rtc_time() 和 millis()（40MHz 晶振基准）比。
+  // 这块板没有 32.768kHz 晶振，深睡期间 RTC 跑内部 RC，偏 1~3% 就是一夜几十分钟。
+  // 每 2 分钟滚一次，结果存进 RTC 内存，醒来按它把睡过去的秒数除回去。
+  static uint64_t calRtcUs = 0;
+  static uint32_t calMs    = 0;
+  if (calRtcUs == 0) {
+    calRtcUs = esp_clk_rtc_time();
+    calMs    = millis();
+  } else if (millis() - calMs >= 120000UL) {
+    float r = (float)((esp_clk_rtc_time() - calRtcUs) / 1000.0) / (float)(millis() - calMs);
+    if (r > 0.95f && r < 1.05f) rtcRateFix = r;   // 离谱的读数直接丢
+    calRtcUs = esp_clk_rtc_time();
+    calMs    = millis();
+    DBG("[rtc] 速率 %.4f\n", rtcRateFix);
   }
 
   // 桌宠：眨眼 / 摆尾 / 心情。只重绘桌宠那一小块并推一条带，不整屏刷。
@@ -2022,6 +2273,9 @@ void loop() {
     applyBrightness();
     DBG("[bl] 自动熄屏\n");
   }
+
+  // 熄屏够久且没插线 → 深度睡眠（不返回）
+  maybeAutoSleep(&tm);
 
   // 秒级重绘
   if (tm.tm_sec != lastSec || forceRender) {

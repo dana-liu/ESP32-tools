@@ -4,10 +4,11 @@
 verify_backlight.py —— 实机验证「夜间调光 + 熄屏」里能自动化的部分
 
 触摸唤醒、长按熄屏要用手按，没法脚本模拟；这个脚本覆盖串口能验证的：
-    1. 白天(本地当前时段)自动亮度 = 全亮
+    1. 白天(本地当前时段)自动亮度 = 白天设定（默认 78% = 198/255）
     2. BL|<0-100> 固定亮度生效，BL|auto 恢复自动
+    2.5 BL|day 查/改白天亮度（含 5% 下限保护），测完自动复原
     3. 把设备时钟拨到 21:00 —— 夜间规则生效，亮度自动降到 BL_NIGHT
-    4. 拨回现在 —— 恢复全亮（验证昼夜判断跟着 RTC 走）
+    4. 拨回现在 —— 恢复白天设定（验证昼夜判断跟着 RTC 走）
 
 用法：python3 hook/verify_backlight.py
 """
@@ -66,7 +67,7 @@ def send(fd, line):
 
 
 def read_bl(fd):
-    """发 STATE，解析 STATE|bl|<级别>|<HH:MM>|<夜间>|<熄屏>。"""
+    """发 STATE，解析 STATE|bl|<级别>|<HH:MM>|<夜间>|<熄屏>|<白天设定%>。"""
     send(fd, "STATE")
     time.sleep(0.5)
     raw = drain(fd, 0.8).decode("utf-8", "replace")
@@ -74,12 +75,43 @@ def read_bl(fd):
         line = line.strip()
         if line.startswith("STATE|bl|"):
             f = line[len("STATE|bl|"):].split("|")
-            # f = [级别, HH:MM, 夜间, 熄屏]
+            # f = [级别, HH:MM, 夜间, 熄屏, 白天设定%]  （旧固件没有第 5 项）
             hhmm = f[1].split(":")
             return {"level": int(f[0]),
                     "hh": int(hhmm[0]), "mm": int(hhmm[1]),
-                    "night": f[2] == "1", "off": f[3] == "1"}
+                    "night": f[2] == "1", "off": f[3] == "1",
+                    "dayPct": int(f[4]) if len(f) > 4 else 100}
     return None
+
+
+def read_off(fd):
+    """发 STATE，解析 STATE|off|<开始>|<结束>|<熄屏?>。"""
+    send(fd, "STATE")
+    time.sleep(0.5)
+    raw = drain(fd, 0.8).decode("utf-8", "replace")
+    for line in raw.splitlines():
+        line = line.strip()
+        if line.startswith("STATE|off|"):
+            f = line[len("STATE|off|"):].split("|")
+            return int(f[0]), int(f[1]), f[2] == "1"
+    return None
+
+
+def wake_and_clear_boost(fd):
+    """把屏点亮，并清掉「夜间提亮 30 秒」。
+
+    点亮只能靠触摸/按键，或者重发一次 OFF|<开始>|<结束>（固件里改时段会 wakeScreen）。
+    提亮不关掉的话，夜间会一直是白天亮度，测不出 BL_NIGHT。
+    """
+    info = read_off(fd)
+    if info and info[2]:                       # 屏是灭的
+        a, b, _ = info
+        send(fd, "OFF|%d|%d" % (a, b) if a >= 0 else "OFF|0|0")
+        drain(fd)
+        time.sleep(0.4)
+    send(fd, "BL|auto")                        # blBoostUntil 归零
+    drain(fd)
+    time.sleep(0.3)
 
 
 def main():
@@ -105,8 +137,7 @@ def main():
     # ---- 1. 同步时钟，看当前时段的自动亮度 ----
     send(fd, "TIME|%d" % int(time.time()))
     drain(fd)
-    send(fd, "BL|auto")      # 先清掉上次测试可能留下的 BL| 强制值，保证测的是自动规则
-    drain(fd)
+    wake_and_clear_boost(fd)   # 上一轮测试可能把屏留在熄灭状态
     time.sleep(0.5)
     st = read_bl(fd)
     if not st:
@@ -116,7 +147,10 @@ def main():
     # 夜间判断和设备自报的时间必须一致：20:00-09:00 为夜间
     want_night = st["hh"] >= 20 or st["hh"] < 9
     expect("夜间判断与时间一致", st["night"], want_night)
-    expect("自动亮度(白天=255/夜间=30)", st["level"], 30 if st["night"] else 255)
+    # 白天亮度不是满值（默认 78%），期望值跟着设备自报的设定算
+    day_level = st["dayPct"] * 255 // 100
+    expect("自动亮度(白天=%d/夜间=30)" % day_level, st["level"],
+           30 if st["night"] else day_level)
 
     # ---- 2. 固定亮度 ----
     send(fd, "BL|12")
@@ -135,28 +169,73 @@ def main():
     drain(fd)
     time.sleep(0.3)
     st = read_bl(fd)
-    expect("BL|auto -> 恢复自动", st["level"], 30 if st["night"] else 255)
+    expect("BL|auto -> 恢复自动", st["level"], 30 if st["night"] else day_level)
     expect("熄屏标志仍为 0", st["off"], False)
 
+    # ---- 2.5 白天亮度 BL|day：查 / 改 / 复原（会写 NVS，测完必须改回去）----
+    keep = st["dayPct"]
+    send(fd, "BL|day")
+    drain(fd)
+    time.sleep(0.3)
+    st = read_bl(fd)
+    expect("BL|day 查询 = 当前设定", st["dayPct"], keep)
+
+    send(fd, "BL|day|60")
+    drain(fd)
+    time.sleep(0.4)
+    st = read_bl(fd)
+    expect("BL|day|60 设定生效", st["dayPct"], 60)
+    if not st["night"]:
+        expect("BL|day|60 -> 级别 153", st["level"], 153)
+
+    send(fd, "BL|day|1")          # 下限保护：不许调到全黑
+    drain(fd)
+    time.sleep(0.3)
+    st = read_bl(fd)
+    expect("BL|day|1 被夹到 5", st["dayPct"], 5)
+
+    send(fd, "BL|day|%d" % keep)  # 复原
+    drain(fd)
+    time.sleep(0.4)
+    st = read_bl(fd)
+    expect("复原白天亮度", st["dayPct"], keep)
+
     # ---- 3. 拨到晚上 21:00，验证夜间规则 ----
+    # 注意：自动熄屏时段（默认 20~10）完全覆盖夜间调光时段（20~09），
+    # 所以夜里屏是「熄」而不是「暗」。要单独验调光，得先临时关掉自动熄屏。
+    send(fd, "OFF|20|10")    # 顺便把屏点亮（改时段会 wakeScreen）
+    drain(fd)
+    time.sleep(0.4)
+    send(fd, "OFF|off")
+    drain(fd)
+    time.sleep(0.3)
+    send(fd, "BL|auto")      # 清掉 wakeScreen 带出来的 30 秒提亮，否则夜里还是白天亮度
+    drain(fd)
+    time.sleep(0.3)
+
     now = datetime.datetime.now()
     night = now.replace(hour=21, minute=0, second=0, microsecond=0)
     send(fd, "TIME|%d" % int(night.timestamp()))
     drain(fd)
     time.sleep(0.8)          # 等 loop 下一轮 applyBrightness
     st = read_bl(fd)
-    print("[3] 设备时间拨到 21:00")
+    print("[3] 设备时间拨到 21:00（自动熄屏已临时关闭）")
     expect("进入夜间", st["night"], True)
     expect("亮度降为 30", st["level"], 30)
+    expect("未熄屏（自动熄屏已关）", st["off"], False)
 
-    # ---- 4. 拨回现在 ----
+    # ---- 4. 拨回现在，并恢复自动熄屏时段 ----
     send(fd, "TIME|%d" % int(time.time()))
     drain(fd)
     time.sleep(0.8)
+    send(fd, "OFF|20|10")
+    drain(fd)
+    time.sleep(0.4)
     st = read_bl(fd)
-    print("[4] 设备时间还原")
+    print("[4] 设备时间还原 + 自动熄屏时段恢复")
     expect("退出夜间", st["night"], False)
-    expect("亮度恢复 255", st["level"], 255)
+    expect("亮度恢复白天设定", st["level"], st["dayPct"] * 255 // 100)
+    expect("屏是亮的", st["off"], False)
 
     os.close(fd)
     print("\n结果: %s" % ("全部通过 ✓" if ok else "有失败项 ✗"))

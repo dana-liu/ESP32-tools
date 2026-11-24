@@ -457,8 +457,8 @@
                            mainScreen(now);
     svg.innerHTML = `<rect width="240" height="240" fill="${C_BG}"/>` + body + toast();
 
-    // 背光：熄屏全黑，夜间未提亮则压暗
-    const dim = S.off ? 0 : (S.night && !S.boosted ? 0.28 : 1);
+    // 背光：熄屏全黑，夜间未提亮则压暗；白天 78%（固件 blDayPct）
+    const dim = S.off ? 0 : (S.night && !S.boosted ? 0.28 : 0.78);
     svg.style.filter = `brightness(${dim})`;
   }
 

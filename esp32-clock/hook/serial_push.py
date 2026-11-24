@@ -29,7 +29,9 @@ serial_push.py —— 把钉钉日程通过 USB 串口推给 ESP32 时钟
     python3 serial_push.py --once       # 推一次就退出（调试用）
     python3 serial_push.py --vol 60     # 设音量
     python3 serial_push.py --beep       # 让设备响一次
-    python3 serial_push.py --bl 12      # 固定背光亮度（0-100），--bl auto 恢复自动
+    python3 serial_push.py --bl 12      # 临时固定背光亮度（0-100），--bl auto 恢复自动
+    python3 serial_push.py --bl "day|86"  # 改「白天亮度」并存进设备 NVS（持久，默认 78）
+    python3 serial_push.py --bl day     # 查当前白天亮度设定
 
 环境变量：
     CLOCK_BRIDGE         桥接地址，默认 http://127.0.0.1:8787
